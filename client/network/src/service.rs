@@ -61,7 +61,7 @@ use mixnet::MixnetBehaviour;
 use parking_lot::Mutex;
 use sc_client_api::{BlockBackend, ProofProvider};
 use sc_consensus::{BlockImportError, BlockImportStatus, ImportQueue, Link};
-use sc_network_sync::{Status as SyncStatus, SyncState};
+use sc_network_common::sync::{SyncState, SyncStatus};
 use sc_peerset::PeersetHandle;
 use sc_utils::mpsc::{tracing_unbounded, TracingUnboundedReceiver, TracingUnboundedSender};
 use sp_blockchain::{HeaderBackend, HeaderMetadata};
@@ -149,6 +149,47 @@ where
 	/// for the network processing to advance. From it, you can extract a `NetworkService` using
 	/// `worker.service()`. The `NetworkService` can be shared through the codebase.
 	pub fn new(mut params: Params<B, H, Client>) -> Result<Self, Error> {
+		// Private and public keys configuration.
+		let local_identity = params.network_config.node_key.clone().into_keypair()?;
+		let local_public = local_identity.public();
+		let local_peer_id = local_public.to_peer_id();
+
+		params.network_config.boot_nodes = params
+			.network_config
+			.boot_nodes
+			.into_iter()
+			.filter(|boot_node| {
+				if boot_node.peer_id == local_peer_id {
+					warn!(
+						target: "sub-libp2p",
+						"Local peer ID used in bootnode, ignoring: {}",
+						boot_node,
+					);
+					false
+				} else {
+					true
+				}
+			})
+			.collect();
+		params.network_config.default_peers_set.reserved_nodes = params
+			.network_config
+			.default_peers_set
+			.reserved_nodes
+			.into_iter()
+			.filter(|reserved_node| {
+				if reserved_node.peer_id == local_peer_id {
+					warn!(
+						target: "sub-libp2p",
+						"Local peer ID used in reserved node, ignoring: {}",
+						reserved_node,
+					);
+					false
+				} else {
+					true
+				}
+			})
+			.collect();
+
 		// Ensure the listen addresses are consistent with the transport.
 		ensure_addresses_consistent_with_transport(
 			params.network_config.listen_addresses.iter(),
@@ -191,10 +232,6 @@ where
 			.extra_sets
 			.insert(0, transactions_handler_proto.set_config());
 
-		// Private and public keys configuration.
-		let local_identity = params.network_config.node_key.clone().into_keypair()?;
-		let local_public = local_identity.public();
-		let local_peer_id = local_public.to_peer_id();
 		info!(
 			target: "sub-libp2p",
 			"🏷  Local node identity is: {}",
@@ -203,17 +240,8 @@ where
 
 		let default_notif_handshake_message = Roles::from(&params.role).encode();
 
-		let (warp_sync_provider, warp_sync_protocol_config) = match params.warp_sync {
-			Some((p, c)) => (Some(p), Some(c)),
-			None => (None, None),
-		};
-
 		let (protocol, peerset_handle, mut known_addresses) = Protocol::new(
-			protocol::ProtocolConfig {
-				roles: From::from(&params.role),
-				max_parallel_downloads: params.network_config.max_parallel_downloads,
-				sync_mode: params.network_config.sync_mode.clone(),
-			},
+			From::from(&params.role),
 			params.chain.clone(),
 			params.protocol_id.clone(),
 			&params.network_config,
@@ -223,9 +251,8 @@ where
 						.map(|_| default_notif_handshake_message.clone()),
 				)
 				.collect(),
-			params.block_announce_validator,
 			params.metrics_registry.as_ref(),
-			warp_sync_provider,
+			params.chain_sync,
 		)?;
 
 		// List of multiaddresses that we know in the network.
@@ -262,7 +289,6 @@ where
 		let is_major_syncing = Arc::new(AtomicBool::new(false));
 
 		// Build the swarm.
-		let client = params.chain.clone();
 		let (mut swarm, bandwidth): (Swarm<Behaviour<B, Client>>, _) = {
 			let user_agent = format!(
 				"{} ({})",
@@ -348,7 +374,7 @@ where
 			};
 
 			let behaviour = {
-				let bitswap = params.network_config.ipfs_server.then(|| Bitswap::new(client));
+				let bitswap = params.network_config.ipfs_server.then(|| Bitswap::new(params.chain));
 
 				let mut mixnet = None;
 				if let Some((mixnet_in, mixnet_out, command_sender)) = params.mixnet {
@@ -362,7 +388,7 @@ where
 					discovery_config,
 					params.block_request_protocol_config,
 					params.state_request_protocol_config,
-					warp_sync_protocol_config,
+					params.warp_sync_protocol_config,
 					bitswap,
 					mixnet,
 					params.light_client_request_protocol_config,
@@ -451,7 +477,6 @@ where
 
 		let (tx_handler, tx_handler_controller) = transactions_handler_proto.build(
 			service.clone(),
-			params.role,
 			params.transaction_pool,
 			params.metrics_registry.as_ref(),
 		)?;
@@ -2012,12 +2037,16 @@ where
 
 						if this.boot_node_ids.contains(&peer_id) {
 							if let DialError::WrongPeerId { obtained, endpoint } = &error {
-								error!(
-									"💔 The bootnode you want to connect provided a different peer ID than the one you expect: `{}` with `{}`:`{:?}`.",
-									peer_id,
-									obtained,
-									endpoint,
-								);
+								if let ConnectedPoint::Dialer { address, role_override: _ } =
+									endpoint
+								{
+									error!(
+										"💔 The bootnode you want to connect to at `{}` provided a different peer ID `{}` than the one you expect `{}`.",
+										address,
+										obtained,
+										peer_id,
+									);
+								}
 							}
 						}
 					}

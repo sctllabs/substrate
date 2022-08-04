@@ -29,7 +29,8 @@ use codec::{Decode, Encode};
 use futures::{channel::oneshot, FutureExt, TryFutureExt};
 use jsonrpsee::{
 	core::{async_trait, Error as JsonRpseeError, RpcResult},
-	PendingSubscription,
+	types::SubscriptionResult,
+	SubscriptionSink,
 };
 use parking_lot::Mutex;
 use sc_rpc_api::DenyUnsafe;
@@ -223,13 +224,13 @@ where
 			.collect())
 	}
 
-	fn watch_extrinsic(&self, pending: PendingSubscription, xt: Bytes) {
+	fn watch_extrinsic(&self, mut sink: SubscriptionSink, xt: Bytes) -> SubscriptionResult {
 		let best_block_hash = self.client.info().best_hash;
 		let dxt = match TransactionFor::<P>::decode(&mut &xt[..]).map_err(|e| Error::from(e)) {
 			Ok(dxt) => dxt,
 			Err(e) => {
-				pending.reject(JsonRpseeError::from(e));
-				return
+				let _ = sink.reject(JsonRpseeError::from(e));
+				return Ok(())
 			},
 		};
 
@@ -246,19 +247,15 @@ where
 			let stream = match submit.await {
 				Ok(stream) => stream,
 				Err(err) => {
-					pending.reject(JsonRpseeError::from(err));
+					let _ = sink.reject(JsonRpseeError::from(err));
 					return
 				},
-			};
-
-			let mut sink = match pending.accept() {
-				Some(sink) => sink,
-				_ => return,
 			};
 
 			sink.pipe_from_stream(stream).await;
 		};
 
 		self.executor.spawn("substrate-rpc-subscription", Some("rpc"), fut.boxed());
+		Ok(())
 	}
 }
