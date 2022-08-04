@@ -335,7 +335,7 @@ where
 			if let Some(key) = topology.sessions.get(&auth_pub_pair) {
 				let mut peer_id = [0u8; 32];
 				peer_id.copy_from_slice(&key.1[..]);
-				if old_authority.remove(&peer_id).is_some() {
+				if old_authority.remove(&peer_id).is_none() {
 					remove_limit.push(peer_id.clone());
 				}
 				// derive from grandpa one
