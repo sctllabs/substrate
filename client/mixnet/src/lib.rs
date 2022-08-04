@@ -155,7 +155,7 @@ where
 
 		let topology = AuthorityStar::new(
 			mixnet_config.local_id.clone(),
-			network_identity.public().into(),
+			PeerId::from_public_key(&network_identity.public()),
 			mixnet_config.public_key.clone(),
 			key_store.clone(),
 		);

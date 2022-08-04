@@ -37,7 +37,6 @@ use libp2p::{
 	NetworkBehaviour,
 };
 use log::{debug, info, trace};
-use prost::Message;
 
 use sc_client_api::{BlockBackend, ProofProvider};
 use sc_consensus::import_queue::{IncomingBlock, Origin};
