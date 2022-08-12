@@ -21,7 +21,7 @@ use crate::{
 	discovery::{DiscoveryBehaviour, DiscoveryConfig, DiscoveryOut},
 	peer_info,
 	protocol::{message::Roles, CustomMessageOutcome, NotificationsSink, Protocol},
-	request_responses, DhtEvent, ObservedRole,
+	request_responses,
 };
 use bytes::Bytes;
 use codec::{Decode, Encode};
@@ -38,9 +38,15 @@ use libp2p::{
 };
 use log::{debug, info, trace};
 
+pub use crate::request_responses::{InboundFailure, OutboundFailure, RequestId, ResponseFailure};
+use mixnet::{MixPeerId, MixnetBehaviour, MixnetEvent};
 use sc_client_api::{BlockBackend, ProofProvider};
 use sc_consensus::import_queue::{IncomingBlock, Origin};
-use sc_network_common::{config::ProtocolId, request_responses::ProtocolConfig};
+use sc_network_common::{
+	config::ProtocolId,
+	protocol::event::{DhtEvent, ObservedRole},
+	request_responses::{IfDisconnected, ProtocolConfig, RequestFailure},
+};
 use sc_peerset::PeersetHandle;
 use sp_blockchain::{HeaderBackend, HeaderMetadata};
 use sp_consensus::BlockOrigin;
@@ -55,11 +61,6 @@ use std::{
 	task::{Context, Poll},
 	time::Duration,
 };
-
-pub use crate::request_responses::{
-	IfDisconnected, InboundFailure, OutboundFailure, RequestFailure, RequestId, ResponseFailure,
-};
-use mixnet::{MixPeerId, MixnetBehaviour, MixnetEvent};
 
 /// Command for the mixnet worker.
 pub enum MixnetCommand {
