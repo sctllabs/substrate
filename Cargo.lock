@@ -1856,7 +1856,7 @@ version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "403ef3e961ab98f0ba902771d29f842058578bb1ce7e3c59dad5a6a93e784c69"
 dependencies = [
- "curve25519-dalek 3.0.2",
+ "curve25519-dalek 3.2.0",
  "hex",
  "rand_core 0.6.2",
  "sha2 0.9.8",

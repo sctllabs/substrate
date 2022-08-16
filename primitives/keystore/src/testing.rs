@@ -398,7 +398,7 @@ impl SyncCryptoStore for KeyStore {
 		// the same to yield a Curve25519 keypair with the same public key.
 		// let ed25519_sk = ed25519::SecretKey::from(ed);
 		let mut curve25519_sk = [0; 32];
-		let hash = <sha2::Sha512 as sha2::Digest>::digest(ed25519_sk);
+		let hash = <sha2::Sha512 as sha2::Digest>::digest(&ed25519_sk);
 		curve25519_sk.copy_from_slice(&hash[..32]);
 		Ok(curve25519_sk.into())
 	}
