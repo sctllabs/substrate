@@ -655,7 +655,7 @@ impl Topology for AuthorityStar {
 	}
 
 	fn random_path(
-		&self,
+		&mut self,
 		start_node: (&MixPeerId, Option<&MixPublicKey>),
 		recipient_node: (&MixPeerId, Option<&MixPublicKey>),
 		nb_chunk: usize,
@@ -711,12 +711,14 @@ impl Topology for AuthorityStar {
 		let mut result = Vec::with_capacity(nb_chunk);
 		while result.len() < nb_chunk {
 			let mut ids = BTreeSet::new();
+			let mut ordered_ids = Vec::with_capacity(nb_chunk);
 			ids.insert(start.clone());
 			ids.insert(recipient.clone());
 			while ids.len() - 2 < num_hops - 1 {
 				if let Some(key) = self.random_connected(|k| ids.contains(k)) {
 					trace!(target: "mixnet", "Add hop {:?}.", key);
 					ids.insert(key.0);
+					ordered_ids.push(key.0);
 				} else {
 					debug!(target: "mixnet", "No random connected {:?}.", ids.len() - 2);
 					return Err(Error::NotEnoughRoutingPeers)
@@ -729,9 +731,7 @@ impl Topology for AuthorityStar {
 				path.push((peer.clone(), key.clone()));
 			}
 
-			ids.remove(&start);
-			ids.remove(&recipient);
-			for peer_id in ids.into_iter() {
+			for peer_id in ordered_ids.into_iter() {
 				if let Some(public_key) = self.authorities.get(&peer_id) {
 					path.push((peer_id, public_key.clone()));
 				} else {
