@@ -56,7 +56,7 @@ pub const CRYPTO_ID: CryptoTypeId = CryptoTypeId(*b"ed25");
 /// of the key pair (yeah, dumb); as such we're forced to remember the seed manually if we
 /// will need it later (such as for HDKD).
 #[cfg(feature = "full_crypto")]
-pub type Seed = [u8; 32];
+type Seed = [u8; 32];
 
 /// A public key.
 #[cfg_attr(feature = "full_crypto", derive(Hash))]

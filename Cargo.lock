@@ -1466,12 +1466,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cryptoxide"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "129eabb7b0b78644a3a7e7cf220714aba47463bb281f69fa7a71ca5d12564cca"
-
-[[package]]
 name = "csv"
 version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1840,15 +1834,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37c66a534cbb46ab4ea03477eae19d5c22c01da8258030280b7bd9d8433fb6ef"
 dependencies = [
  "signature",
-]
-
-[[package]]
-name = "ed25519-bip32"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb588f93c0d91b2f668849fd6d030cddb0b2e31f105963be189da5acdf492a21"
-dependencies = [
- "cryptoxide",
 ]
 
 [[package]]
@@ -9981,7 +9966,6 @@ name = "sp-keystore"
 version = "0.12.0"
 dependencies = [
  "async-trait",
- "ed25519-bip32",
  "futures",
  "merlin",
  "parity-scale-codec",

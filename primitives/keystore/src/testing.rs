@@ -385,23 +385,22 @@ impl SyncCryptoStore for KeyStore {
 		pair.map(|k| k.sign_prehashed(msg)).map(Ok).transpose()
 	}
 
-	fn ed25519_unsafe_soft_derive_key(
+	fn mixnet_secret_from_ed25519(
 		&self,
 		id: KeyTypeId,
-		public: &ed25519::Public,
-		index: u32,
-		with_extended_secret: bool,
-	) -> Result<([u8; 32], Option<[u8; 64]>), Error> {
-		let pair = if with_extended_secret {
-			let pair = self.ed25519_key_pair(id, public);
-			if pair.is_none() {
-				return Err(Error::Other("Key not found".into()))
-			}
-			pair
-		} else {
-			None
-		};
-		crate::ed25519_unsafe_soft_derive_key_utils(public, pair, index)
+		key: &ed25519::Public,
+	) -> Result<crate::MixnetSecret, Error> {
+		let key_pair = self.ed25519_key_pair(id, &key).unwrap();
+		let ed25519_sk = key_pair.seed();
+
+		// An Ed25519 public key is derived off the left half of the SHA512 of the
+		// secret scalar, hence a matching conversion of the secret key must do
+		// the same to yield a Curve25519 keypair with the same public key.
+		// let ed25519_sk = ed25519::SecretKey::from(ed);
+		let mut curve25519_sk = [0; 32];
+		let hash = <sha2::Sha512 as sha2::Digest>::digest(&ed25519_sk);
+		curve25519_sk.copy_from_slice(&hash[..32]);
+		Ok(curve25519_sk.into())
 	}
 }
 
@@ -506,13 +505,5 @@ mod tests {
 		let res =
 			SyncCryptoStore::ecdsa_sign_prehashed(&store, ECDSA, &pair.public(), &msg).unwrap();
 		assert!(res.is_some());
-	}
-
-	#[test]
-	fn derive_junction_check() {
-		assert_eq!(
-			&"DO NOT USE: secret in server mem".to_string().as_bytes()[..],
-			&crate::DERIVE_UNSAFE_CHAINCODE[..]
-		);
 	}
 }
