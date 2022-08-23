@@ -22,7 +22,8 @@ use parking_lot::RwLock;
 use sp_application_crypto::{ecdsa, ed25519, sr25519, AppKey, AppPair, IsWrappedBy};
 use sp_core::{
 	crypto::{
-		ByteArray, CryptoTypePublicPair, ExposeSecret, KeyTypeId, Pair as PairT, SecretString,
+		ByteArray, CryptoTypePublicPair, DeriveJunction, ExposeSecret, KeyTypeId, Pair as PairT,
+		SecretString,
 	},
 	sr25519::{Pair as Sr25519Pair, Public as Sr25519Public},
 	Encode,
@@ -351,29 +352,23 @@ impl SyncCryptoStore for LocalKeystore {
 		pair.map(|k| k.sign_prehashed(msg)).map(Ok).transpose()
 	}
 
-	fn mixnet_secret_from_ed25519(
+	fn ed25519_derive_key(
 		&self,
 		id: KeyTypeId,
-		key: &ed25519::Public,
-	) -> std::result::Result<sp_keystore::MixnetSecret, TraitError> {
-		if let Some(key_pair) = self
+		public: &ed25519::Public,
+		path: &[DeriveJunction],
+	) -> std::result::Result<(ed25519::Public, Option<ed25519::Seed>), TraitError> {
+		if let Some(pair) = self
 			.0
 			.read()
-			.key_pair_by_type::<ed25519::Pair>(key, id)
+			.key_pair_by_type::<ed25519::Pair>(public, id)
 			.map_err(TraitError::from)?
 		{
-			let ed25519_sk = key_pair.seed();
-
-			// An Ed25519 public key is derived off the left half of the SHA512 of the
-			// secret scalar, hence a matching conversion of the secret key must do
-			// the same to yield a Curve25519 keypair with the same public key.
-			// let ed25519_sk = ed25519::SecretKey::from(ed);
-			let mut curve25519_sk = [0; 32];
-			let hash = <sha2::Sha512 as sha2::Digest>::digest(&ed25519_sk);
-			curve25519_sk.copy_from_slice(&hash[..32]);
-			Ok(curve25519_sk.into())
+			pair.derive(path.iter().cloned(), None)
+				.map_err(|_derive_error| TraitError::Other("Unable to derive key.".into()))
+				.map(|(pair, secret)| (pair.public(), secret))
 		} else {
-			Err(TraitError::Other("Missing pair in keystore.".into()))
+			Err(TraitError::Other("Key not found".into()))
 		}
 	}
 }

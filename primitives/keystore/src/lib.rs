@@ -23,7 +23,7 @@ use crate::vrf::{VRFSignature, VRFTranscriptData};
 use async_trait::async_trait;
 use futures::{executor::block_on, future::join_all};
 use sp_core::{
-	crypto::{CryptoTypePublicPair, KeyTypeId},
+	crypto::{CryptoTypePublicPair, DeriveJunction, KeyTypeId},
 	ecdsa, ed25519, sr25519,
 };
 use std::sync::Arc;
@@ -209,9 +209,6 @@ pub trait CryptoStore: Send + Sync {
 	) -> Result<Option<ecdsa::Signature>, Error>;
 }
 
-/// Secret that can be derived for using with mixnet.
-pub type MixnetSecret = x25519_dalek::StaticSecret;
-
 /// Sync version of the CryptoStore
 ///
 /// Some parts of Substrate still rely on a sync version of the `CryptoStore`.
@@ -249,15 +246,14 @@ pub trait SyncCryptoStore: CryptoStore + Send + Sync {
 		seed: Option<&str>,
 	) -> Result<ed25519::Public, Error>;
 
-	/// Construct a Montgomery curve25519 private key from an Ed25519 secret key.
-	///
-	/// This function is only temporary until DH could be defined at keystore level
-	/// or mixnet publish their own keys.
-	fn mixnet_secret_from_ed25519(
+	/// Derive a key from an existing one and extract derived secret
+	/// if known.
+	fn ed25519_derive_key(
 		&self,
 		id: KeyTypeId,
-		key: &ed25519::Public,
-	) -> Result<MixnetSecret, Error>;
+		public: &ed25519::Public,
+		path: &[DeriveJunction],
+	) -> Result<(ed25519::Public, Option<ed25519::Seed>), Error>;
 
 	/// Returns all ecdsa public keys for the given key type.
 	fn ecdsa_public_keys(&self, id: KeyTypeId) -> Vec<ecdsa::Public>;
