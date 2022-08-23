@@ -23,7 +23,7 @@ use crate::vrf::{VRFSignature, VRFTranscriptData};
 use async_trait::async_trait;
 use futures::{executor::block_on, future::join_all};
 use sp_core::{
-	crypto::{CryptoTypePublicPair, DeriveJunction, KeyTypeId},
+	crypto::{CryptoTypePublicPair, KeyTypeId},
 	ecdsa, ed25519, sr25519,
 };
 use std::sync::Arc;
@@ -248,12 +248,13 @@ pub trait SyncCryptoStore: CryptoStore + Send + Sync {
 
 	/// Derive a key from an existing one and extract derived secret
 	/// if known.
-	fn ed25519_derive_key(
+	fn ed25519_unsafe_soft_derive_key(
 		&self,
 		id: KeyTypeId,
 		public: &ed25519::Public,
-		path: &[DeriveJunction],
-	) -> Result<(ed25519::Public, Option<ed25519::Seed>), Error>;
+		index: u32,
+		with_secret: bool,
+	) -> Result<([u8; 32], Option<[u8; 64]>), Error>;
 
 	/// Returns all ecdsa public keys for the given key type.
 	fn ecdsa_public_keys(&self, id: KeyTypeId) -> Vec<ecdsa::Public>;
@@ -399,4 +400,39 @@ pub type SyncCryptoStorePtr = Arc<dyn SyncCryptoStore>;
 sp_externalities::decl_extension! {
 	/// The keystore extension to register/retrieve from the externalities.
 	pub struct KeystoreExt(SyncCryptoStorePtr);
+}
+
+/// First hard derivation path to apply when allowing extraction of a derived key with secret.
+pub const DERIVE_UNSAFE_CHAINCODE: [u8; 32] = [
+	68, 79, 32, 78, 79, 84, 32, 85, 83, 69, 58, 32, 115, 101, 99, 114, 101, 116, 32, 105, 110, 32,
+	115, 101, 114, 118, 101, 114, 32, 109, 101, 109,
+];
+
+/// Utils to implement `ed25519_unsafe_soft_derive_key` from keypair material.
+pub fn ed25519_unsafe_soft_derive_key_utils(
+	public: &ed25519::Public,
+	pair: Option<ed25519::Pair>,
+	index: u32,
+) -> Result<([u8; 32], Option<[u8; 64]>), Error> {
+	let (public, secret) = if let Some(pair) = pair {
+		let secret = pair.seed();
+		// TODO no_force instead ? generally this usage of soft
+		// derivation is probably unsafe.
+		let xpriv =
+			ed25519_bip32::XPrv::from_nonextended_force(&secret, &crate::DERIVE_UNSAFE_CHAINCODE);
+		let secret = xpriv.derive(ed25519_bip32::DerivationScheme::V2, index);
+		(secret.public(), Some(secret.extended_secret_key().clone()))
+	} else {
+		let xpub = ed25519_bip32::XPub::from_pk_and_chaincode(
+			public.as_ref(),
+			&crate::DERIVE_UNSAFE_CHAINCODE,
+		);
+		let public = xpub
+			.derive(ed25519_bip32::DerivationScheme::V2, index)
+			.map_err(|_| Error::Other("Error deriving public key".into()))?;
+
+		(public, None)
+	};
+
+	Ok((public.public_key(), secret))
 }

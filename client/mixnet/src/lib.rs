@@ -22,7 +22,7 @@
 //!
 //! Topology specific to substrate and utils to link to network.
 
-use mixnet::{Error, MixPeerId, MixPublicKey, Topology};
+use mixnet::{Error, MixPeerId, MixPublicKey, SendOptions, Topology};
 
 pub use mixnet::{Config, SinkToWorker, StreamFromWorker};
 use sp_application_crypto::key_types;
@@ -59,6 +59,10 @@ const UNSYNCH_FINALIZED_MARGIN: u32 = 10;
 /// Delay in seconds after which if no finalization occurs,
 /// we switch back to synching state.
 const DELAY_NO_FINALISATION_S: u64 = 60;
+
+/// Mixnet key is derived from grandpa key following
+/// this key derivation index (need to be less than 0x80000000).
+const KEYDER_INDEX: u32 = 0x41796116;
 
 /// Mixnet running worker.
 pub struct MixnetWorker<B: BlockT, C> {
@@ -198,18 +202,25 @@ where
 		if let Some(grandpa_key) = grandpa_key {
 			let mut p = [0u8; 32];
 			p.copy_from_slice(grandpa_key.as_ref());
-			let pub_key = mixnet::public_from_ed25519(p);
-
-			let priv_key = SyncCryptoStore::mixnet_secret_from_ed25519(
+			//			let pub_key = mixnet::public_from_ed25519(p);
+			if let Ok((public, Some(secret))) = SyncCryptoStore::ed25519_unsafe_soft_derive_key(
 				&*key_store,
 				key_types::GRANDPA,
 				&grandpa_key,
-			)
-			.ok()?;
-			Some((pub_key, priv_key))
-		} else {
-			None
+				KEYDER_INDEX,
+				true,
+			) {
+				let mut p = [0u8; 32];
+				p.copy_from_slice(&secret[0..32]);
+				// TODO this is incorrect, may go with just direct from p.
+				//				let priv_key = mixnet::secret_from_ed25519(&p);
+				let priv_key = p.into();
+				p.copy_from_slice(public.as_ref());
+				let pub_key = mixnet::public_from_ed25519(p);
+				return Some((pub_key, priv_key))
+			}
 		}
+		None
 	}
 
 	pub async fn run(mut self) {
@@ -339,9 +350,19 @@ where
 					remove_limit.push(peer_id.clone());
 				}
 				// derive from grandpa one
-				let mut p = [0u8; 32];
-				p.copy_from_slice(auth.as_ref());
-				let public_key = mixnet::public_from_ed25519(p);
+				let public_key = if let Ok((public_key, None)) =
+					SyncCryptoStore::ed25519_unsafe_soft_derive_key(
+						&*self.key_store,
+						key_types::GRANDPA,
+						&auth.clone().into(),
+						KEYDER_INDEX,
+						false,
+					) {
+					mixnet::public_from_ed25519(public_key)
+				} else {
+					error!(target: "mixnet", "Error deriving public key, skipping");
+					continue
+				};
 
 				if self.authority_id.as_ref() == Some(&auth) {
 					debug!(target: "mixnet", "In new authority set, routing.");
@@ -352,15 +373,24 @@ where
 					});
 					let new_key = (current_public_key != public_key)
 						.then(|| {
-							let secret_key = SyncCryptoStore::mixnet_secret_from_ed25519(
-								&*self.key_store,
-								key_types::GRANDPA,
-								&auth.into(),
-							)
-							.ok()?;
-							topology.node_public_key = public_key.clone();
-
-							Some((public_key.clone(), secret_key))
+							if let Ok((_public, Some(secret_key))) =
+								SyncCryptoStore::ed25519_unsafe_soft_derive_key(
+									&*self.key_store,
+									key_types::GRANDPA,
+									&auth.into(),
+									KEYDER_INDEX,
+									true,
+								) {
+								let mut p = [0u8; 32];
+								p.copy_from_slice(&secret_key[0..32]);
+								// TODO this is incorrect, may go with just direct from p.
+								//								let secret_key = mixnet::secret_from_ed25519(&p);
+								let secret_key = p.into();
+								topology.node_public_key = public_key.clone();
+								Some((public_key, secret_key))
+							} else {
+								None
+							}
 						})
 						.flatten();
 					if new_id.is_some() || new_key.is_some() {
@@ -596,10 +626,6 @@ impl AuthorityStar {
 }
 
 impl Topology for AuthorityStar {
-	fn first_hop_nodes(&self) -> Vec<(MixPeerId, MixPublicKey)> {
-		self.authorities.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-	}
-
 	fn first_hop_nodes_external(
 		&self,
 		from: &MixPeerId,
@@ -607,8 +633,9 @@ impl Topology for AuthorityStar {
 	) -> Vec<(MixPeerId, MixPublicKey)> {
 		// allow for all
 		let mut keys: Vec<_> = self
-			.first_hop_nodes()
-			.into_iter()
+			.authorities
+			.iter()
+			.map(|(k, v)| (k.clone(), v.clone()))
 			.filter(|(id, _key)| self.connected_nodes.contains_key(id))
 			.filter(|(id, _key)| from != id)
 			.filter(|(id, _key)| to != id)
@@ -624,7 +651,11 @@ impl Topology for AuthorityStar {
 		self.is_routing(id)
 	}
 
-	fn random_recipient(&self, _from: &MixPeerId) -> Option<(MixPeerId, MixPublicKey)> {
+	fn random_recipient(
+		&mut self,
+		_from: &MixPeerId,
+		_options: &SendOptions,
+	) -> Option<(MixPeerId, MixPublicKey)> {
 		self.random_connected(|_| false)
 	}
 

@@ -18,7 +18,7 @@
 //! Types that should only be used for testing!
 
 use sp_core::{
-	crypto::{ByteArray, CryptoTypePublicPair, DeriveJunction, KeyTypeId, Pair},
+	crypto::{ByteArray, CryptoTypePublicPair, KeyTypeId, Pair},
 	ecdsa, ed25519, sr25519,
 };
 
@@ -385,19 +385,23 @@ impl SyncCryptoStore for KeyStore {
 		pair.map(|k| k.sign_prehashed(msg)).map(Ok).transpose()
 	}
 
-	fn ed25519_derive_key(
+	fn ed25519_unsafe_soft_derive_key(
 		&self,
 		id: KeyTypeId,
 		public: &ed25519::Public,
-		path: &[DeriveJunction],
-	) -> Result<(ed25519::Public, Option<ed25519::Seed>), Error> {
-		if let Some(pair) = self.ed25519_key_pair(id, public) {
-			pair.derive(path.iter().cloned(), None)
-				.map_err(|_derive_error| Error::Other("Unable to derive key.".into()))
-				.map(|(pair, secret)| (pair.public(), secret))
+		index: u32,
+		with_extended_secret: bool,
+	) -> Result<([u8; 32], Option<[u8; 64]>), Error> {
+		let pair = if with_extended_secret {
+			let pair = self.ed25519_key_pair(id, public);
+			if pair.is_none() {
+				return Err(Error::Other("Key not found".into()))
+			}
+			pair
 		} else {
-			Err(Error::Other("Key not found".into()))
-		}
+			None
+		};
+		crate::ed25519_unsafe_soft_derive_key_utils(public, pair, index)
 	}
 }
 
@@ -502,5 +506,13 @@ mod tests {
 		let res =
 			SyncCryptoStore::ecdsa_sign_prehashed(&store, ECDSA, &pair.public(), &msg).unwrap();
 		assert!(res.is_some());
+	}
+
+	#[test]
+	fn derive_junction_check() {
+		assert_eq!(
+			&"DO NOT USE: secret in server mem".to_string().as_bytes()[..],
+			&crate::DERIVE_UNSAFE_CHAINCODE[..]
+		);
 	}
 }

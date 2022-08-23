@@ -22,8 +22,7 @@ use parking_lot::RwLock;
 use sp_application_crypto::{ecdsa, ed25519, sr25519, AppKey, AppPair, IsWrappedBy};
 use sp_core::{
 	crypto::{
-		ByteArray, CryptoTypePublicPair, DeriveJunction, ExposeSecret, KeyTypeId, Pair as PairT,
-		SecretString,
+		ByteArray, CryptoTypePublicPair, ExposeSecret, KeyTypeId, Pair as PairT, SecretString,
 	},
 	sr25519::{Pair as Sr25519Pair, Public as Sr25519Public},
 	Encode,
@@ -352,24 +351,27 @@ impl SyncCryptoStore for LocalKeystore {
 		pair.map(|k| k.sign_prehashed(msg)).map(Ok).transpose()
 	}
 
-	fn ed25519_derive_key(
+	fn ed25519_unsafe_soft_derive_key(
 		&self,
 		id: KeyTypeId,
 		public: &ed25519::Public,
-		path: &[DeriveJunction],
-	) -> std::result::Result<(ed25519::Public, Option<ed25519::Seed>), TraitError> {
-		if let Some(pair) = self
-			.0
-			.read()
-			.key_pair_by_type::<ed25519::Pair>(public, id)
-			.map_err(TraitError::from)?
-		{
-			pair.derive(path.iter().cloned(), None)
-				.map_err(|_derive_error| TraitError::Other("Unable to derive key.".into()))
-				.map(|(pair, secret)| (pair.public(), secret))
+		index: u32,
+		with_extended_secret: bool,
+	) -> std::result::Result<([u8; 32], Option<[u8; 64]>), TraitError> {
+		let pair = if with_extended_secret {
+			let pair = self
+				.0
+				.read()
+				.key_pair_by_type::<ed25519::Pair>(public, id)
+				.map_err(TraitError::from)?;
+			if pair.is_none() {
+				return Err(TraitError::Other("Key not found".into()))
+			}
+			pair
 		} else {
-			Err(TraitError::Other("Key not found".into()))
-		}
+			None
+		};
+		sp_keystore::ed25519_unsafe_soft_derive_key_utils(public, pair, index)
 	}
 }
 
