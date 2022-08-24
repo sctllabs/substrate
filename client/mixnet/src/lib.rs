@@ -32,6 +32,7 @@ use codec::Encode;
 use futures::{future, FutureExt, StreamExt};
 use futures_timer::Delay;
 use log::{debug, error, trace, warn};
+use prometheus_endpoint::Registry as PrometheusRegistry;
 use sc_client_api::{BlockchainEvents, FinalityNotification, UsageProvider};
 use sc_network::{MixnetCommand, PeerId};
 use sc_utils::mpsc::tracing_unbounded;
@@ -125,6 +126,7 @@ where
 			NumberFor<B>,
 		>,
 		key_store: Arc<dyn SyncCryptoStore>,
+		metrics: Option<PrometheusRegistry>,
 	) -> Option<Self> {
 		let max_external = Some(MAX_EXTERNAL);
 		let mut local_public_key = None;
@@ -160,6 +162,17 @@ where
 
 		let finality_stream = client.finality_notification_stream();
 
+		let metrics = if let Some(metrics) = metrics {
+			Some(
+				metrics::register_metrics(metrics, &mixnet_config.local_id)
+					.map_err(|e| {
+						log::error!(target: "mixnet", "{}", format!("metrics: {:?}", e));
+					})
+					.ok()?,
+			)
+		} else {
+			None
+		};
 		let topology = AuthorityStar::new(
 			mixnet_config.local_id.clone(),
 			PeerId::from_public_key(&network_identity.public()),
@@ -167,6 +180,7 @@ where
 			key_store.clone(),
 			&mixnet_config,
 			max_external,
+			metrics,
 		);
 
 		let worker = mixnet::MixnetWorker::new(mixnet_config, topology, inner_channels.0);
@@ -347,7 +361,15 @@ where
 				if self.authority_id.as_ref() == Some(&auth) {
 					debug!(target: "mixnet", "In new authority set, routing.");
 					topology.routing = true;
+					// TODO this change condition looks unreachable: should rather check
+					// if current local id is in session and if not try to update it like
+					// when we did start.
 					let new_id = (current_local_id != peer_id).then(|| {
+						topology.metrics.as_mut().map(|m| {
+							if let Err(e) = m.change_id(&peer_id) {
+								error!(target: "mixnet", "Error changing local id in metrics {:?}", e);
+							}
+						});
 						topology.local_id = peer_id.clone();
 						peer_id.clone()
 					});
@@ -378,8 +400,9 @@ where
 
 		let connected = std::mem::take(&mut topology.connected_nodes);
 		topology.nb_connected_forward_routing = 0;
+		topology.nb_connected_receive_routing = 0;
 		topology.nb_connected_external = 0;
-		topology.nb_connected_external = 0;
+		topology.copy_connected_info_to_metrics();
 		for (peer_id, (key, _)) in connected.into_iter() {
 			topology.add_connected_peer(peer_id, key);
 		}
@@ -527,6 +550,8 @@ pub struct AuthorityStar {
 
 	// limit to external connection
 	max_external: Option<usize>,
+
+	metrics: Option<metrics::MetricsHandle>,
 }
 
 enum ConnectedKind {
@@ -551,6 +576,7 @@ impl AuthorityStar {
 		key_store: Arc<dyn SyncCryptoStore>,
 		config: &Config,
 		max_external: Option<usize>,
+		metrics: Option<metrics::MetricsHandle>,
 	) -> Self {
 		AuthorityStar {
 			local_id,
@@ -566,6 +592,7 @@ impl AuthorityStar {
 			nb_connected_external: 0,
 			target_bytes_per_seconds: config.target_bytes_per_second as usize,
 			max_external,
+			metrics,
 		}
 	}
 
@@ -575,6 +602,15 @@ impl AuthorityStar {
 
 	fn has_enough_nodes_to_proxy(&self) -> bool {
 		self.authorities.len() >= LOW_MIXNET_THRESHOLD
+	}
+
+	fn copy_connected_info_to_metrics(&self) {
+		self.metrics.as_ref().map(|m| {
+			m.number_connected.set(self.connected_nodes.len() as u64);
+			m.number_connected_forward_routing.set(self.nb_connected_forward_routing as u64);
+			m.number_connected_receive_routing.set(self.nb_connected_receive_routing as u64);
+			m.number_connected_external.set(self.nb_connected_external as u64);
+		});
 	}
 
 	fn add_connected_peer(&mut self, peer_id: MixPeerId, key: MixPublicKey) {
@@ -607,6 +643,8 @@ impl AuthorityStar {
 			ConnectedKind::External
 		};
 		self.connected_nodes.insert(peer_id, (key, kind));
+		println!("Conected {:?}", self.connected_nodes.len());
+		self.copy_connected_info_to_metrics();
 	}
 
 	fn add_disconnected_peer(&mut self, peer_id: &MixPeerId) {
@@ -627,6 +665,7 @@ impl AuthorityStar {
 					self.nb_connected_receive_routing -= 1;
 				},
 			}
+			self.copy_connected_info_to_metrics();
 		}
 	}
 }
@@ -858,8 +897,11 @@ impl Topology for AuthorityStar {
 
 	fn bandwidth_external(&self, _id: &MixPeerId) -> Option<(usize, usize)> {
 		// TODO can cache this result (Option<Option<(usize, usize))
+
+		// Equal bandwidth amongst connected peers.
 		let nb_forward = self.nb_connected_forward_routing;
 		let nb_receive = self.nb_connected_receive_routing;
+		// TODO add parameter to indicate if for a new peer or an existing one.
 		let nb_external = self.nb_connected_external + 1;
 
 		let forward_bandwidth = ((EXTERNAL_BANDWIDTH.0 + EXTERNAL_BANDWIDTH.1) *
@@ -926,7 +968,7 @@ impl Topology for AuthorityStar {
 			},
 			_ => (),
 		}
-		log::error!(target: "mixnet", "Missing imonline key for handshake.");
+		error!(target: "mixnet", "Missing imonline key for handshake.");
 		None
 	}
 
@@ -935,5 +977,111 @@ impl Topology for AuthorityStar {
 			self.routing_to(peer_id, local_id) ||
 			(self.nb_connected_external < self.max_external.unwrap_or(usize::MAX) &&
 				self.bandwidth_external(peer_id).is_some())
+	}
+}
+
+mod metrics {
+	use log::trace;
+	use mixnet::MixPeerId;
+	use prometheus_endpoint::{register, Gauge, Opts, PrometheusError, Registry, U64};
+
+	/// Handle to metrics update.
+	pub struct MetricsHandle {
+		pub mixnet_info: Gauge<U64>,
+		pub number_connected: Gauge<U64>,
+		pub number_connected_forward_routing: Gauge<U64>,
+		pub number_connected_receive_routing: Gauge<U64>,
+		pub number_connected_external: Gauge<U64>,
+
+		registry: Registry,
+	}
+
+	/// Register all metrics to endpoint and return handle.
+	pub fn register_metrics(
+		registry: Registry,
+		peer_id: &MixPeerId,
+	) -> Result<MetricsHandle, PrometheusError> {
+		trace!(target: "mixnet", "Registering metrics");
+		let mixnet_info = register(
+			Gauge::<U64>::with_opts(
+				Opts::new("substrate_mixnet_peer_id", "Current mixnet id for a always one value")
+					.const_label(
+						"id",
+						format!("{:?}", sp_core::hexdisplay::HexDisplay::from(peer_id)),
+					),
+			)?,
+			&registry,
+		)?;
+		mixnet_info.set(1);
+		let number_connected = register(
+			Gauge::<U64>::with_opts(Opts::new(
+				"substrate_mixnet_number_connected",
+				"Total number of connected over mixnet (external node included)",
+			))?,
+			&registry,
+		)?;
+		let number_connected_forward_routing = register(
+			Gauge::<U64>::with_opts(Opts::new(
+				"substrate_mixnet_number_connected_forward_routing",
+				"Total number of connected peer for proxying message to.",
+			))?,
+			&registry,
+		)?;
+		let number_connected_receive_routing = register(
+			Gauge::<U64>::with_opts(Opts::new(
+				"substrate_mixnet_number_connected_receive_routing",
+				"Total number of connected peer for receiving message from.",
+			))?,
+			&registry,
+		)?;
+		let number_connected_external = register(
+			Gauge::<U64>::with_opts(Opts::new(
+				"substrate_mixnet_number_connected_external",
+				"Total number of external connected peer we provide access to.",
+			))?,
+			&registry,
+		)?;
+
+		number_connected.set(0);
+		/*		let nb_connected = register(
+			GaugeVec::new(
+				Opts::new("substrate_mixnet_number_connected", "Total number of connected"),
+				&["status"],
+			)?,
+			prometheus,
+		)?*/
+
+		Ok(MetricsHandle {
+			mixnet_info,
+			number_connected,
+			number_connected_forward_routing,
+			number_connected_receive_routing,
+			number_connected_external,
+
+			registry,
+		})
+	}
+
+	impl MetricsHandle {
+		/// Change metrics containing id, this is slown and a misuse of metrics, but does not happen
+		/// often.
+		pub fn change_id(&mut self, new_peer_id: &MixPeerId) -> Result<(), PrometheusError> {
+			self.registry.unregister(Box::new(self.mixnet_info.clone()))?;
+			self.mixnet_info = register(
+				Gauge::<U64>::with_opts(
+					Opts::new(
+						"substrate_mixnet_peer_id",
+						"Current mixnet id for a always one value",
+					)
+					.const_label(
+						"id",
+						format!("{:?}", sp_core::hexdisplay::HexDisplay::from(new_peer_id)),
+					),
+				)?,
+				&self.registry,
+			)?;
+			self.mixnet_info.set(1);
+			Ok(())
+		}
 	}
 }

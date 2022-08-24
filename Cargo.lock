@@ -8514,6 +8514,7 @@ dependencies = [
  "sp-keystore",
  "sp-runtime",
  "sp-session",
+ "substrate-prometheus-endpoint",
 ]
 
 [[package]]
