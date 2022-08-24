@@ -4512,7 +4512,7 @@ dependencies = [
 [[package]]
 name = "mixnet"
 version = "0.1.0"
-source = "git+https://github.com/cheme/mixnet?branch=branch_2#4e9ab73f6c3cd0766d5431df575ba492585ea95c"
+source = "git+https://github.com/cheme/mixnet?branch=branch_2#3657151331de7aa5ffa10c8b6f6b124c1a443028"
 dependencies = [
  "aes 0.8.1",
  "arrayref",
@@ -11284,7 +11284,7 @@ version = "1.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
 dependencies = [
- "cfg-if 1.0.0",
+ "cfg-if 0.1.10",
  "digest 0.10.3",
  "rand 0.8.4",
  "static_assertions",

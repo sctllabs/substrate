@@ -60,6 +60,13 @@ const UNSYNCH_FINALIZED_MARGIN: u32 = 10;
 /// we switch back to synching state.
 const DELAY_NO_FINALISATION_S: u64 = 60;
 
+/// Maximum number of external node.
+const MAX_EXTERNAL: usize = 10;
+
+/// Percent of additional bandwidth allowed for external
+/// node message reception.
+const EXTERNAL_BANDWIDTH: (usize, usize) = (1, 10);
+
 /// Mixnet running worker.
 pub struct MixnetWorker<B: BlockT, C> {
 	// current node authority_id if validating.
@@ -77,7 +84,6 @@ pub struct MixnetWorker<B: BlockT, C> {
 	// External command.
 	command_stream: futures::channel::mpsc::Receiver<MixnetCommand>,
 	key_store: Arc<dyn SyncCryptoStore>,
-	default_limit_config: Option<usize>,
 }
 
 type WorkerChannels = (mixnet::WorkerChannels, futures::channel::mpsc::Receiver<MixnetCommand>);
@@ -120,6 +126,7 @@ where
 		>,
 		key_store: Arc<dyn SyncCryptoStore>,
 	) -> Option<Self> {
+		let max_external = Some(MAX_EXTERNAL);
 		let mut local_public_key = None;
 		// get the peer id, could be another one than the one define in session: in this
 		// case node will restart.
@@ -158,8 +165,9 @@ where
 			PeerId::from_public_key(&network_identity.public()),
 			mixnet_config.public_key.clone(),
 			key_store.clone(),
+			&mixnet_config,
+			max_external,
 		);
-		let default_limit_config = mixnet_config.limit_per_window.clone();
 
 		let worker = mixnet::MixnetWorker::new(mixnet_config, topology, inner_channels.0);
 		let state = State::Synching;
@@ -173,7 +181,6 @@ where
 			state,
 			command_stream: inner_channels.1,
 			key_store,
-			default_limit_config,
 		})
 	}
 
@@ -319,25 +326,19 @@ where
 		self.session = Some(session);
 		self.fetch_new_session_keys(at, session);
 		self.update_own_public_key_within_authority_set(&set);
-		let mut remove_limit = Vec::new();
 		let current_local_id = self.worker.local_id().clone();
 		let current_public_key = self.worker.public_key().clone();
 		let topology = &mut self.worker.mixnet_mut().topology;
 		debug!(target: "mixnet", "Change authorities {:?}", set);
-		let mut old_authority = std::mem::take(&mut topology.authorities);
-
 		topology.routing = false;
 
 		let mut restart = None;
 		for (auth, _) in set.into_iter() {
 			use sp_application_crypto::Public;
-			let auth_pub_pair = auth.clone().to_public_crypto_pair(); // TODO change key type in map?
+			let auth_pub_pair = auth.clone().to_public_crypto_pair();
 			if let Some(key) = topology.sessions.get(&auth_pub_pair) {
 				let mut peer_id = [0u8; 32];
 				peer_id.copy_from_slice(&key.1[..]);
-				if old_authority.remove(&peer_id).is_none() {
-					remove_limit.push(peer_id.clone());
-				}
 				// derive from grandpa one
 				let mut p = [0u8; 32];
 				p.copy_from_slice(auth.as_ref());
@@ -347,7 +348,7 @@ where
 					debug!(target: "mixnet", "In new authority set, routing.");
 					topology.routing = true;
 					let new_id = (current_local_id != peer_id).then(|| {
-						topology.node_id = peer_id.clone();
+						topology.local_id = peer_id.clone();
 						peer_id.clone()
 					});
 					let new_key = (current_public_key != public_key)
@@ -374,18 +375,20 @@ where
 				error!(target: "mixnet", "Missing imonline key for authority {:?}, not adding it to topology.", auth);
 			}
 		}
+
+		let connected = std::mem::take(&mut topology.connected_nodes);
+		topology.nb_connected_forward_routing = 0;
+		topology.nb_connected_external = 0;
+		topology.nb_connected_external = 0;
+		for (peer_id, (key, _)) in connected.into_iter() {
+			topology.add_connected_peer(peer_id, key);
+		}
+
 		if let Some((id, key)) = restart {
 			self.worker.restart(id, key);
 		}
+
 		self.update_state(false);
-		for peer in remove_limit.into_iter() {
-			debug!(target: "mixnet", "Remove limit for {:?}.", peer);
-			self.worker.change_peer_limit_window(&peer, None);
-		}
-		for (peer, _) in old_authority.into_iter() {
-			debug!(target: "mixnet", "Restore limit for {:?}.", peer);
-			self.worker.change_peer_limit_window(&peer, self.default_limit_config.clone());
-		}
 	}
 
 	fn fetch_new_session_keys(&mut self, mut at: NumberFor<B>, session: SetId) {
@@ -476,16 +479,16 @@ where
 	fn update_state(&mut self, synched: bool) {
 		match &self.state {
 			State::Running =>
-				if !self.worker.mixnet().topology.has_enough_nodes() {
+				if !self.worker.mixnet().topology.has_enough_nodes_to_proxy() {
 					self.state = State::WaitingMorePeers;
 				},
 			State::WaitingMorePeers =>
-				if self.worker.mixnet().topology.has_enough_nodes() {
+				if self.worker.mixnet().topology.has_enough_nodes_to_proxy() {
 					debug!(target: "mixnet", "Mixnet running.");
 					self.state = State::Running;
 				},
 			State::Synching if synched =>
-				if self.worker.mixnet().topology.has_enough_nodes() {
+				if self.worker.mixnet().topology.has_enough_nodes_to_proxy() {
 					debug!(target: "mixnet", "Mixnet running.");
 					self.state = State::Running;
 				} else {
@@ -504,18 +507,33 @@ where
 /// When sending a message, the message can only reach nodes
 /// that are part of the topology.
 pub struct AuthorityStar {
-	node_id: MixPeerId,
+	local_id: MixPeerId,
 	network_id: PeerId,
 	node_public_key: MixPublicKey,
 	key_store: Arc<dyn SyncCryptoStore>,
 	// true when we are in authorities set.
 	routing: bool,
+	nb_connected_forward_routing: usize,
+	nb_connected_receive_routing: usize,
+	nb_connected_external: usize,
 	// All authorities are considered connected (when building message except first hop).
 	authorities: BTreeMap<MixPeerId, MixPublicKey>,
 	// The connected nodes (for first hop use `authorities` joined `connected_nodes`).
-	connected_nodes: HashMap<MixPeerId, MixPublicKey>,
+	connected_nodes: HashMap<MixPeerId, (MixPublicKey, ConnectedKind)>,
 	// Current session mapping of Grandpa key to IMonline key.
 	sessions: HashMap<CryptoTypePublicPair, CryptoTypePublicPair>,
+
+	target_bytes_per_seconds: usize,
+
+	// limit to external connection
+	max_external: Option<usize>,
+}
+
+enum ConnectedKind {
+	External,
+	RoutingForward,
+	RoutingReceive,
+	RoutingReceiveForward,
 }
 
 #[derive(Clone)]
@@ -527,13 +545,15 @@ pub struct AuthorityInfo {
 impl AuthorityStar {
 	/// Instantiate a new topology.
 	pub fn new(
-		node_id: MixPeerId,
+		local_id: MixPeerId,
 		network_id: PeerId,
 		node_public_key: MixPublicKey,
 		key_store: Arc<dyn SyncCryptoStore>,
+		config: &Config,
+		max_external: Option<usize>,
 	) -> Self {
 		AuthorityStar {
-			node_id,
+			local_id,
 			network_id,
 			node_public_key,
 			authorities: BTreeMap::new(),
@@ -541,26 +561,73 @@ impl AuthorityStar {
 			sessions: HashMap::new(),
 			routing: false,
 			key_store,
+			nb_connected_forward_routing: 0,
+			nb_connected_receive_routing: 0,
+			nb_connected_external: 0,
+			target_bytes_per_seconds: config.target_bytes_per_second as usize,
+			max_external,
 		}
 	}
 
-	fn has_enough_nodes(&self) -> bool {
+	fn has_enough_nodes_to_send(&self) -> bool {
+		self.authorities.len() >= LOW_MIXNET_THRESHOLD
+	}
+
+	fn has_enough_nodes_to_proxy(&self) -> bool {
 		self.authorities.len() >= LOW_MIXNET_THRESHOLD
 	}
 
 	fn add_connected_peer(&mut self, peer_id: MixPeerId, key: MixPublicKey) {
 		debug!(target: "mixnet", "Connected to mixnet {:?} {:?}", peer_id, key);
-		if let Some(public_key) = self.connected_nodes.get_mut(&peer_id) {
+		if let Some((public_key, _)) = self.connected_nodes.get_mut(&peer_id) {
 			*public_key = key;
 			return
 		}
-
-		self.connected_nodes.insert(peer_id, key);
+		let kind = if self.is_routing(&peer_id) {
+			if !self.routing {
+				self.nb_connected_external += 1;
+				ConnectedKind::External
+			} else if self.routing_to(&self.local_id, &peer_id) {
+				self.nb_connected_forward_routing += 1;
+				if self.routing_to(&peer_id, &self.local_id) {
+					self.nb_connected_receive_routing += 1;
+					ConnectedKind::RoutingReceiveForward
+				} else {
+					ConnectedKind::RoutingForward
+				}
+			} else if self.routing_to(&peer_id, &self.local_id) {
+				self.nb_connected_receive_routing += 1;
+				ConnectedKind::RoutingReceive
+			} else {
+				self.nb_connected_external += 1;
+				ConnectedKind::External
+			}
+		} else {
+			self.nb_connected_external += 1;
+			ConnectedKind::External
+		};
+		self.connected_nodes.insert(peer_id, (key, kind));
 	}
 
 	fn add_disconnected_peer(&mut self, peer_id: &MixPeerId) {
 		debug!(target: "mixnet", "Disconnected from mixnet {:?}", peer_id);
-		let _ = self.connected_nodes.remove(peer_id);
+		if let Some((_key, kind)) = self.connected_nodes.remove(peer_id) {
+			match kind {
+				ConnectedKind::External => {
+					self.nb_connected_external -= 1;
+				},
+				ConnectedKind::RoutingReceive => {
+					self.nb_connected_receive_routing -= 1;
+				},
+				ConnectedKind::RoutingForward => {
+					self.nb_connected_forward_routing -= 1;
+				},
+				ConnectedKind::RoutingReceiveForward => {
+					self.nb_connected_forward_routing -= 1;
+					self.nb_connected_receive_routing -= 1;
+				},
+			}
+		}
 	}
 }
 
@@ -570,10 +637,6 @@ impl AuthorityStar {
 		skip: impl Fn(&MixPeerId) -> bool,
 	) -> Option<(MixPeerId, MixPublicKey)> {
 		use rand::RngCore;
-		if !self.has_enough_nodes() {
-			debug!(target: "mixnet", "Not enough routing nodes for path.");
-			return None
-		}
 		// Warning this assume that PeerId is a randomly distributed value.
 		let mut ix = [0u8; 32];
 		rand::thread_rng().fill_bytes(&mut ix[..]);
@@ -626,13 +689,18 @@ impl Topology for AuthorityStar {
 		_from: &MixPeerId,
 		_options: &SendOptions,
 	) -> Option<(MixPeerId, MixPublicKey)> {
+		if !self.has_enough_nodes_to_send() {
+			debug!(target: "mixnet", "Not enough routing nodes for path.");
+			return None
+		}
+
 		self.random_connected(|_| false)
 	}
 
 	/// For a given peer return a list of peers it is supposed to be connected to.
 	/// Return `None` if peer is unknown to the topology.
 	fn neighbors(&self, from: &MixPeerId) -> Option<Vec<(MixPeerId, MixPublicKey)>> {
-		if self.authorities.contains_key(from) || (&self.node_id == from && self.routing) {
+		if self.authorities.contains_key(from) || (&self.local_id == from && self.routing) {
 			Some(
 				self.authorities
 					.iter()
@@ -651,8 +719,8 @@ impl Topology for AuthorityStar {
 	}
 
 	fn routing_to(&self, from: &MixPeerId, to: &MixPeerId) -> bool {
-		(self.authorities.contains_key(from) || (&self.node_id == from && self.routing)) &&
-			(self.authorities.contains_key(to) || (&self.node_id == to && self.routing))
+		(self.authorities.contains_key(from) || (&self.local_id == from && self.routing)) &&
+			(self.authorities.contains_key(to) || (&self.local_id == to && self.routing))
 	}
 
 	fn random_path(
@@ -716,6 +784,11 @@ impl Topology for AuthorityStar {
 			ids.insert(start.clone());
 			ids.insert(recipient.clone());
 			while ids.len() - 2 < num_hops - 1 {
+				if !self.has_enough_nodes_to_proxy() {
+					debug!(target: "mixnet", "Not enough routing nodes for path.");
+					return Err(Error::NotEnoughRoutingPeers)
+				}
+
 				if let Some(key) = self.random_connected(|k| ids.contains(k)) {
 					trace!(target: "mixnet", "Add hop {:?}.", key);
 					ids.insert(key.0);
@@ -740,12 +813,12 @@ impl Topology for AuthorityStar {
 					unreachable!("node in routing_nodes must also be in connected_nodes");
 				}
 			}
-			if let Some(public_key) = self.connected_nodes.get(&recipient) {
+			if let Some((public_key, _)) = self.connected_nodes.get(&recipient) {
 				path.push((recipient.clone(), public_key.clone()));
 			} else {
-				if self.node_id == recipient {
+				if self.local_id == recipient {
 					// surb reply
-					path.push((self.node_id.clone(), self.node_public_key.clone()));
+					path.push((self.local_id.clone(), self.node_public_key.clone()));
 				} else {
 					error!(target: "mixnet", "Unknown recipient");
 					return Err(Error::NotEnoughRoutingPeers)
@@ -766,7 +839,7 @@ impl Topology for AuthorityStar {
 	}
 
 	fn is_routing(&self, id: &MixPeerId) -> bool {
-		if id == &self.node_id {
+		if id == &self.local_id {
 			self.routing
 		} else {
 			self.authorities.contains_key(id)
@@ -783,9 +856,21 @@ impl Topology for AuthorityStar {
 		self.add_disconnected_peer(&peer_id);
 	}
 
-	fn allowed_external(&self, _id: &MixPeerId) -> Option<(usize, usize)> {
-		// 10% TODO just limit nb connection (on check_handshake success)
-		Some((1, 10))
+	fn bandwidth_external(&self, _id: &MixPeerId) -> Option<(usize, usize)> {
+		// TODO can cache this result (Option<Option<(usize, usize))
+		let nb_forward = self.nb_connected_forward_routing;
+		let nb_receive = self.nb_connected_receive_routing;
+		let nb_external = self.nb_connected_external + 1;
+
+		let forward_bandwidth = ((EXTERNAL_BANDWIDTH.0 + EXTERNAL_BANDWIDTH.1) *
+			nb_forward * self.target_bytes_per_seconds) /
+			EXTERNAL_BANDWIDTH.1;
+		let receive_bandwidth = nb_receive * self.target_bytes_per_seconds;
+
+		let available_bandwidth = forward_bandwidth - receive_bandwidth;
+		let available_per_external = available_bandwidth / nb_external;
+
+		Some((available_per_external, self.target_bytes_per_seconds))
 	}
 
 	fn handshake_size(&self) -> usize {
@@ -810,7 +895,7 @@ impl Topology for AuthorityStar {
 		debug!(target: "mixnet", "check handshake: {:?}, {:?}, {:?} from {:?}", peer_id, message, signature, _from);
 		use sp_application_crypto::RuntimePublic;
 		if key.verify(&message, &signature) {
-			if !self.accept_peer(&self.node_id, &peer_id) {
+			if !self.accept_peer(&self.local_id, &peer_id) {
 				return None
 			}
 			let pk = MixPublicKey::from(pk);
@@ -821,19 +906,19 @@ impl Topology for AuthorityStar {
 	}
 
 	fn handshake(&mut self, with: &PeerId, public_key: &MixPublicKey) -> Option<Vec<u8>> {
-		let mut result = self.node_id.to_vec();
+		let mut result = self.local_id.to_vec();
 		result.extend_from_slice(&public_key.as_bytes()[..]);
 		let mut message = with.to_bytes().to_vec();
 		message.extend_from_slice(&public_key.as_bytes()[..]);
 		match SyncCryptoStore::sign_with(
 			&*self.key_store,
 			key_types::IM_ONLINE,
-			&CryptoTypePublicPair(sp_core::sr25519::CRYPTO_ID, self.node_id.to_vec()),
+			&CryptoTypePublicPair(sp_core::sr25519::CRYPTO_ID, self.local_id.to_vec()),
 			&message[..],
 		) {
 			Ok(Some(signature)) => {
 				result.extend_from_slice(&signature[..]);
-				trace!(target: "mixnet", "create handshake: {:?}, {:?}, {:?} with {:?}", self.node_id, message, signature, with);
+				trace!(target: "mixnet", "create handshake: {:?}, {:?}, {:?} with {:?}", self.local_id, message, signature, with);
 				return Some(result)
 			},
 			Err(e) => {
@@ -843,5 +928,12 @@ impl Topology for AuthorityStar {
 		}
 		log::error!(target: "mixnet", "Missing imonline key for handshake.");
 		None
+	}
+
+	fn accept_peer(&self, local_id: &MixPeerId, peer_id: &MixPeerId) -> bool {
+		self.routing_to(local_id, peer_id) ||
+			self.routing_to(peer_id, local_id) ||
+			(self.nb_connected_external < self.max_external.unwrap_or(usize::MAX) &&
+				self.bandwidth_external(peer_id).is_some())
 	}
 }
