@@ -137,10 +137,13 @@ where
 			.rev()
 		{
 			if SyncCryptoStore::has_keys(&*key_store, &[(key.0.into(), key_types::IM_ONLINE)]) {
+				// use first with a secret key, on handle new auth, if we are
+				// authority this will be updated to the right one, otherwise
+				// any key will do.
 				local_public_key = Some(key);
 				break
 			} else {
-				log::error!(target: "mixnet", "No private key for imonline key");
+				log::warn!(target: "mixnet", "No private key for imonline key, may be old key");
 			}
 		}
 
@@ -361,9 +364,6 @@ where
 				if self.authority_id.as_ref() == Some(&auth) {
 					debug!(target: "mixnet", "In new authority set, routing.");
 					topology.routing = true;
-					// TODO this change condition looks unreachable: should rather check
-					// if current local id is in session and if not try to update it like
-					// when we did start.
 					let new_id = (current_local_id != peer_id).then(|| {
 						topology.metrics.as_mut().map(|m| {
 							if let Err(e) = m.change_id(&peer_id) {
@@ -386,6 +386,9 @@ where
 							Some((public_key.clone(), secret_key))
 						})
 						.flatten();
+					if new_id.is_some() && new_key.is_none() {
+						error!("peer id derived from public key, one cannot change without the other");
+					}
 					if new_id.is_some() || new_key.is_some() {
 						restart = Some((new_id, new_key));
 					}
