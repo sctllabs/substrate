@@ -387,7 +387,9 @@ where
 						})
 						.flatten();
 					if new_id.is_some() && new_key.is_none() {
-						error!("peer id derived from public key, one cannot change without the other");
+						error!(
+							"peer id derived from public key, one cannot change without the other"
+						);
 					}
 					if new_id.is_some() || new_key.is_some() {
 						restart = Some((new_id, new_key));
@@ -609,10 +611,26 @@ impl AuthorityStar {
 
 	fn copy_connected_info_to_metrics(&self) {
 		self.metrics.as_ref().map(|m| {
-			m.current_connected.with_label_values(&[metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::Total as usize]]).set(self.connected_nodes.len() as u64);
-			m.current_connected.with_label_values(&[metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::Forwarding as usize]]).set(self.nb_connected_forward_routing as u64);
-			m.current_connected.with_label_values(&[metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::Receiving as usize]]).set(self.nb_connected_receive_routing as u64);
-			m.current_connected.with_label_values(&[metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::External as usize]]).set(self.nb_connected_external as u64);
+			m.current_connected
+				.with_label_values(&[
+					metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::Total as usize]
+				])
+				.set(self.connected_nodes.len() as u64);
+			m.current_connected
+				.with_label_values(&[
+					metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::Forwarding as usize]
+				])
+				.set(self.nb_connected_forward_routing as u64);
+			m.current_connected
+				.with_label_values(&[
+					metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::Receiving as usize]
+				])
+				.set(self.nb_connected_receive_routing as u64);
+			m.current_connected
+				.with_label_values(&[
+					metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::External as usize]
+				])
+				.set(self.nb_connected_external as u64);
 		});
 	}
 
@@ -941,11 +959,14 @@ impl Topology for AuthorityStar {
 		use sp_application_crypto::RuntimePublic;
 		if key.verify(&message, &signature) {
 			if !self.accept_peer(&self.local_id, &peer_id) {
+				self.metrics.as_ref().map(|m| m.invalid_handshake.inc());
 				return None
 			}
 			let pk = MixPublicKey::from(pk);
+			self.metrics.as_ref().map(|m| m.valid_handshake.inc());
 			Some((peer_id, pk))
 		} else {
+			self.metrics.as_ref().map(|m| m.invalid_handshake.inc());
 			None
 		}
 	}
@@ -976,22 +997,67 @@ impl Topology for AuthorityStar {
 	}
 
 	fn accept_peer(&self, local_id: &MixPeerId, peer_id: &MixPeerId) -> bool {
-		self.routing_to(local_id, peer_id) ||
+		let accepted = self.routing_to(local_id, peer_id) ||
 			self.routing_to(peer_id, local_id) ||
 			(self.nb_connected_external < self.max_external.unwrap_or(usize::MAX) &&
-				self.bandwidth_external(peer_id).is_some())
+				self.bandwidth_external(peer_id).is_some());
+		if !accepted {
+			self.metrics.as_ref().map(|m| m.rejected_external.inc());
+		}
+		accepted
+	}
+
+	fn collect_windows_stats(&self) -> bool {
+		self.metrics.is_some()
+	}
+
+	fn window_stats(&self, stats: &mixnet::WindowStats) {
+		if let Some(metrics) = self.metrics.as_ref() {
+			let nb_window = stats.window - stats.last_window;
+			if nb_window == 0 {
+				return
+			}
+			let max_paquets = stats.sum_connected.max_peer_paquet_queue_size as u64;
+			if metrics.max_packet_queue_for_peer.get() < max_paquets {
+				metrics.max_packet_queue_for_peer.set(max_paquets);
+			}
+			let total_peer_paquets = stats.sum_connected.peer_paquet_queue_size;
+			if self.nb_connected_forward_routing > 0 {
+				let peer_paquets =
+					total_peer_paquets as f64 / self.nb_connected_forward_routing as f64;
+				let peer_paquets = peer_paquets / nb_window as f64;
+				metrics.avg_packet_queue_size_for_peer.set(peer_paquets);
+				for _ in 0..nb_window {
+					metrics.avg_packet_queue_size_for_peer_histo.observe(peer_paquets);
+				}
+			} else {
+				metrics.avg_packet_queue_size_for_peer.set(0.0);
+			}
+		}
 	}
 }
 
 mod metrics {
 	use log::trace;
 	use mixnet::MixPeerId;
-	use prometheus_endpoint::{register, Gauge, GaugeVec, Opts, PrometheusError, Registry, U64};
+	use prometheus_endpoint::{
+		exponential_buckets, register, Counter, Gauge, GaugeVec, Histogram, HistogramOpts, Opts,
+		PrometheusError, Registry, F64, U64,
+	};
 
 	/// Handle to metrics update.
 	pub struct MetricsHandle {
 		pub mixnet_info: Gauge<U64>,
 		pub current_connected: GaugeVec<U64>,
+		pub valid_handshake: Counter<U64>,
+		pub max_packet_queue_for_peer: Gauge<U64>,
+		pub avg_packet_queue_size_for_peer: Gauge<F64>,
+		// a bit redundant with gauge, should remove later.
+		pub avg_packet_queue_size_for_peer_histo: Histogram,
+		pub invalid_handshake: Counter<U64>,
+		// This may make little sense, just
+		// keeping an eye on it, should remove later.
+		pub rejected_external: Counter<U64>,
 		registry: Registry,
 	}
 
@@ -1002,12 +1068,7 @@ mod metrics {
 		External = 3,
 	}
 
-	pub const LABEL_NODE_STATUS: &[&str] = &[
-		"total",
-		"forwarding",
-		"receiving",
-		"external",
-	];
+	pub const LABEL_NODE_STATUS: &[&str] = &["total", "forwarding", "receiving", "external"];
 
 	/// Register all metrics to endpoint and return handle.
 	pub fn register_metrics(
@@ -1026,6 +1087,25 @@ mod metrics {
 			&registry,
 		)?;
 		mixnet_info.set(1);
+		let rejected_external = register(
+			Counter::<U64>::new(
+				"substrate_mixnet_rejected_external",
+				"Number of external connection refused",
+			)?,
+			&registry,
+		)?;
+		let valid_handshake = register(
+			Counter::<U64>::new("substrate_mixnet_valid_handshake", "Number of handshake valid")?,
+			&registry,
+		)?;
+		let invalid_handshake = register(
+			Counter::<U64>::new(
+				"substrate_mixnet_rejected_handshake",
+				"Number of handshake invalid",
+			)?,
+			&registry,
+		)?;
+
 		let current_connected = register(
 			GaugeVec::new(
 				Opts::new("substrate_mixnet_number_connected", "Current number of connected nodes"),
@@ -1034,14 +1114,42 @@ mod metrics {
 			&registry,
 		)?;
 		for label in LABEL_NODE_STATUS {
-			current_connected
-				.with_label_values(&[label])
-				.set(0);
+			current_connected.with_label_values(&[label]).set(0);
 		}
+		let max_packet_queue_for_peer = register(
+			Gauge::new(
+				"substrate_mixnet_max_paquet_queue_for_peer",
+				"Bigger queue of packet observed for a connection",
+			)?,
+			&registry,
+		)?;
+		let avg_packet_queue_size_for_peer = register(
+			Gauge::new(
+				"substrate_mixnet_paquet_queue_for_peer",
+				"Packet queue size observed for a connection (avg).",
+			)?,
+			&registry,
+		)?;
+		let avg_packet_queue_size_for_peer_histo = register(
+			Histogram::with_opts(
+				HistogramOpts::new(
+					"substrate_mixnet_paquet_queue_size_histogram",
+					"Histogram of observed packet size at end of windows",
+				)
+				.buckets(exponential_buckets(1.0, 2.0, 10).unwrap_or(vec![1.0])),
+			)?,
+			&registry,
+		)?;
 
 		Ok(MetricsHandle {
 			mixnet_info,
 			current_connected,
+			rejected_external,
+			valid_handshake,
+			max_packet_queue_for_peer,
+			avg_packet_queue_size_for_peer,
+			avg_packet_queue_size_for_peer_histo,
+			invalid_handshake,
 			registry,
 		})
 	}
