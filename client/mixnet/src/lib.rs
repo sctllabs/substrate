@@ -32,6 +32,7 @@ use codec::Encode;
 use futures::{future, FutureExt, StreamExt};
 use futures_timer::Delay;
 use log::{debug, error, trace, warn};
+use metrics::{PacketsKind, PacketsResult};
 use prometheus_endpoint::Registry as PrometheusRegistry;
 use sc_client_api::{BlockchainEvents, FinalityNotification, UsageProvider};
 use sc_network::{MixnetCommand, PeerId};
@@ -1017,6 +1018,10 @@ impl Topology for AuthorityStar {
 			if nb_window == 0 {
 				return
 			}
+			metrics.number_of_window.inc();
+			for _ in 1..nb_window {
+				metrics.number_of_skipped_window.inc();
+			}
 			let max_paquets = stats.sum_connected.max_peer_paquet_queue_size as u64;
 			if metrics.max_packet_queue_for_peer.get() < max_paquets {
 				metrics.max_packet_queue_for_peer.set(max_paquets);
@@ -1033,6 +1038,90 @@ impl Topology for AuthorityStar {
 			} else {
 				metrics.avg_packet_queue_size_for_peer.set(0.0);
 			}
+			metrics.set_window_packets(
+				stats.number_received_valid,
+				nb_window,
+				PacketsKind::Received,
+				PacketsResult::Success,
+			);
+			metrics.set_window_packets(
+				stats.number_received_invalid,
+				nb_window,
+				PacketsKind::Received,
+				PacketsResult::Failure,
+			);
+			metrics.set_window_packets(
+				stats.number_from_external_received_valid,
+				nb_window,
+				PacketsKind::ReceivedExternal,
+				PacketsResult::Success,
+			);
+			metrics.set_window_packets(
+				stats.number_from_external_received_invalid,
+				nb_window,
+				PacketsKind::ReceivedExternal,
+				PacketsResult::Failure,
+			);
+			metrics.set_window_packets(
+				stats.sum_connected.number_forwarded_success,
+				nb_window,
+				PacketsKind::Forward,
+				PacketsResult::Success,
+			);
+			metrics.set_window_packets(
+				stats.sum_connected.number_forwarded_failed,
+				nb_window,
+				PacketsKind::Forward,
+				PacketsResult::Failure,
+			);
+			metrics.set_window_packets(
+				stats.sum_connected.number_from_external_forwarded_success,
+				nb_window,
+				PacketsKind::ForwardExternal,
+				PacketsResult::Success,
+			);
+			metrics.set_window_packets(
+				stats.sum_connected.number_from_external_forwarded_failed,
+				nb_window,
+				PacketsKind::ForwardExternal,
+				PacketsResult::Failure,
+			);
+			metrics.set_window_packets(
+				stats.sum_connected.number_from_self_send_success,
+				nb_window,
+				PacketsKind::FromSelf,
+				PacketsResult::Success,
+			);
+			metrics.set_window_packets(
+				stats.sum_connected.number_from_self_send_failed,
+				nb_window,
+				PacketsKind::FromSelf,
+				PacketsResult::Failure,
+			);
+			metrics.set_window_packets(
+				stats.sum_connected.number_surbs_reply_success,
+				nb_window,
+				PacketsKind::SurbsReply,
+				PacketsResult::Success,
+			);
+			metrics.set_window_packets(
+				stats.sum_connected.number_surbs_reply_failed,
+				nb_window,
+				PacketsKind::SurbsReply,
+				PacketsResult::Failure,
+			);
+			metrics.set_window_packets(
+				stats.sum_connected.number_cover_send_success,
+				nb_window,
+				PacketsKind::Cover,
+				PacketsResult::Success,
+			);
+			metrics.set_window_packets(
+				stats.sum_connected.number_cover_send_failed,
+				nb_window,
+				PacketsKind::Cover,
+				PacketsResult::Failure,
+			);
 		}
 	}
 }
@@ -1041,20 +1130,28 @@ mod metrics {
 	use log::trace;
 	use mixnet::MixPeerId;
 	use prometheus_endpoint::{
-		exponential_buckets, register, Counter, Gauge, GaugeVec, Histogram, HistogramOpts, Opts,
-		PrometheusError, Registry, F64, U64,
+		exponential_buckets, register, Counter, Gauge, GaugeVec, Histogram, HistogramOpts,
+		HistogramVec, Opts, PrometheusError, Registry, F64, U64,
 	};
 
 	/// Handle to metrics update.
 	pub struct MetricsHandle {
+		// TODO number of actual message received (from here).
+		// TODO something to check packet delayed (here ~70 cover per window, how many packets)
 		pub mixnet_info: Gauge<U64>,
 		pub current_connected: GaugeVec<U64>,
+		pub last_window_packets: GaugeVec<U64>,
+		pub last_window_packets_histo: HistogramVec,
 		pub valid_handshake: Counter<U64>,
 		pub max_packet_queue_for_peer: Gauge<U64>,
 		pub avg_packet_queue_size_for_peer: Gauge<F64>,
 		// a bit redundant with gauge, should remove later.
 		pub avg_packet_queue_size_for_peer_histo: Histogram,
 		pub invalid_handshake: Counter<U64>,
+		// only to compare with number of skipped window,
+		// otherwhise it is a uptime.
+		pub number_of_window: Counter<U64>,
+		pub number_of_skipped_window: Counter<U64>,
 		// This may make little sense, just
 		// keeping an eye on it, should remove later.
 		pub rejected_external: Counter<U64>,
@@ -1069,6 +1166,35 @@ mod metrics {
 	}
 
 	pub const LABEL_NODE_STATUS: &[&str] = &["total", "forwarding", "receiving", "external"];
+
+	#[derive(Clone, Copy)]
+	pub enum PacketsKind {
+		Received = 0,
+		ReceivedExternal = 1,
+		Forward = 2,
+		ForwardExternal = 3,
+		FromSelf = 4,
+		SurbsReply = 5,
+		Cover = 6,
+	}
+
+	const LABEL_PACKET_KINDS: &[&str] = &[
+		"received",
+		"received from external",
+		"forwarded",
+		"forwarded from external",
+		"send from self",
+		"send as surbs reply",
+		"send cover message",
+	];
+
+	#[derive(Clone, Copy)]
+	pub enum PacketsResult {
+		Success = 0,
+		Failure = 1,
+	}
+
+	const LABEL_PACKET_RESULTS: &[&str] = &["success", "failure"];
 
 	/// Register all metrics to endpoint and return handle.
 	pub fn register_metrics(
@@ -1094,6 +1220,14 @@ mod metrics {
 			)?,
 			&registry,
 		)?;
+		let number_of_window = register(
+			Counter::<U64>::new("substrate_mixnet_windows", "Number of windows observed")?,
+			&registry,
+		)?;
+		let number_of_skipped_window = register(
+			Counter::<U64>::new("substrate_mixnet_windows_skipped", "Number of windows skipped")?,
+			&registry,
+		)?;
 		let valid_handshake = register(
 			Counter::<U64>::new("substrate_mixnet_valid_handshake", "Number of handshake valid")?,
 			&registry,
@@ -1113,6 +1247,29 @@ mod metrics {
 			)?,
 			&registry,
 		)?;
+
+		let last_window_packets = register(
+			GaugeVec::new(
+				Opts::new(
+					"substrate_mixnet_last_window_packets",
+					"Last observed number of packet send in a window",
+				),
+				&["kind", "result"],
+			)?,
+			&registry,
+		)?;
+		let last_window_packets_histo = register(
+			HistogramVec::new(
+				HistogramOpts::new(
+					"substrate_mixnet_last_window_packets_histo",
+					"Histogram of last observed number of packet send in a window",
+				)
+				.buckets(exponential_buckets(1.0, 2.0, 10).unwrap_or(vec![1.0])),
+				&["kind", "result"],
+			)?,
+			&registry,
+		)?;
+
 		for label in LABEL_NODE_STATUS {
 			current_connected.with_label_values(&[label]).set(0);
 		}
@@ -1150,6 +1307,10 @@ mod metrics {
 			avg_packet_queue_size_for_peer,
 			avg_packet_queue_size_for_peer_histo,
 			invalid_handshake,
+			last_window_packets,
+			last_window_packets_histo,
+			number_of_skipped_window,
+			number_of_window,
 			registry,
 		})
 	}
@@ -1174,6 +1335,29 @@ mod metrics {
 			)?;
 			self.mixnet_info.set(1);
 			Ok(())
+		}
+
+		/// Add a new number of packet for window.
+		pub fn set_window_packets(
+			&self,
+			nb_packets: usize,
+			nb_window: usize,
+			kind: PacketsKind,
+			result: PacketsResult,
+		) {
+			let nb_packets = nb_packets / nb_window;
+			self.last_window_packets
+				.with_label_values(&[
+					LABEL_PACKET_KINDS[kind as usize],
+					LABEL_PACKET_RESULTS[result as usize],
+				])
+				.set(nb_packets as u64);
+			self.last_window_packets_histo
+				.with_label_values(&[
+					LABEL_PACKET_KINDS[kind as usize],
+					LABEL_PACKET_RESULTS[result as usize],
+				])
+				.observe(nb_packets as f64);
 		}
 	}
 }
