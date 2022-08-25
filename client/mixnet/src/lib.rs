@@ -609,10 +609,10 @@ impl AuthorityStar {
 
 	fn copy_connected_info_to_metrics(&self) {
 		self.metrics.as_ref().map(|m| {
-			m.number_connected.set(self.connected_nodes.len() as u64);
-			m.number_connected_forward_routing.set(self.nb_connected_forward_routing as u64);
-			m.number_connected_receive_routing.set(self.nb_connected_receive_routing as u64);
-			m.number_connected_external.set(self.nb_connected_external as u64);
+			m.current_connected.with_label_values(&[metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::Total as usize]]).set(self.connected_nodes.len() as u64);
+			m.current_connected.with_label_values(&[metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::Forwarding as usize]]).set(self.nb_connected_forward_routing as u64);
+			m.current_connected.with_label_values(&[metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::Receiving as usize]]).set(self.nb_connected_receive_routing as u64);
+			m.current_connected.with_label_values(&[metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::External as usize]]).set(self.nb_connected_external as u64);
 		});
 	}
 
@@ -986,18 +986,28 @@ impl Topology for AuthorityStar {
 mod metrics {
 	use log::trace;
 	use mixnet::MixPeerId;
-	use prometheus_endpoint::{register, Gauge, Opts, PrometheusError, Registry, U64};
+	use prometheus_endpoint::{register, Gauge, GaugeVec, Opts, PrometheusError, Registry, U64};
 
 	/// Handle to metrics update.
 	pub struct MetricsHandle {
 		pub mixnet_info: Gauge<U64>,
-		pub number_connected: Gauge<U64>,
-		pub number_connected_forward_routing: Gauge<U64>,
-		pub number_connected_receive_routing: Gauge<U64>,
-		pub number_connected_external: Gauge<U64>,
-
+		pub current_connected: GaugeVec<U64>,
 		registry: Registry,
 	}
+
+	pub enum ConnectedNodeStatus {
+		Total = 0,
+		Forwarding = 1,
+		Receiving = 2,
+		External = 3,
+	}
+
+	pub const LABEL_NODE_STATUS: &[&str] = &[
+		"total",
+		"forwarding",
+		"receiving",
+		"external",
+	];
 
 	/// Register all metrics to endpoint and return handle.
 	pub fn register_metrics(
@@ -1016,51 +1026,22 @@ mod metrics {
 			&registry,
 		)?;
 		mixnet_info.set(1);
-		let number_connected = register(
-			Gauge::<U64>::with_opts(Opts::new(
-				"substrate_mixnet_number_connected",
-				"Total number of connected over mixnet (external node included)",
-			))?,
-			&registry,
-		)?;
-		let number_connected_forward_routing = register(
-			Gauge::<U64>::with_opts(Opts::new(
-				"substrate_mixnet_number_connected_forward_routing",
-				"Total number of connected peer for proxying message to.",
-			))?,
-			&registry,
-		)?;
-		let number_connected_receive_routing = register(
-			Gauge::<U64>::with_opts(Opts::new(
-				"substrate_mixnet_number_connected_receive_routing",
-				"Total number of connected peer for receiving message from.",
-			))?,
-			&registry,
-		)?;
-		let number_connected_external = register(
-			Gauge::<U64>::with_opts(Opts::new(
-				"substrate_mixnet_number_connected_external",
-				"Total number of external connected peer we provide access to.",
-			))?,
-			&registry,
-		)?;
-
-		number_connected.set(0);
-		/*		let nb_connected = register(
+		let current_connected = register(
 			GaugeVec::new(
-				Opts::new("substrate_mixnet_number_connected", "Total number of connected"),
+				Opts::new("substrate_mixnet_number_connected", "Current number of connected nodes"),
 				&["status"],
 			)?,
-			prometheus,
-		)?*/
+			&registry,
+		)?;
+		for label in LABEL_NODE_STATUS {
+			current_connected
+				.with_label_values(&[label])
+				.set(0);
+		}
 
 		Ok(MetricsHandle {
 			mixnet_info,
-			number_connected,
-			number_connected_forward_routing,
-			number_connected_receive_routing,
-			number_connected_external,
-
+			current_connected,
 			registry,
 		})
 	}
