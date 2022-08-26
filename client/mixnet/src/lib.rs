@@ -35,7 +35,7 @@ use log::{debug, error, trace, warn};
 use metrics::{PacketsKind, PacketsResult};
 use prometheus_endpoint::Registry as PrometheusRegistry;
 use sc_client_api::{BlockchainEvents, FinalityNotification, UsageProvider};
-use sc_network::{MixnetCommand, PeerId};
+use sc_network::{MixnetCommand, PeerId as NetworkPeerId};
 use sc_utils::mpsc::tracing_unbounded;
 use sp_api::ProvideRuntimeApi;
 use sp_core::crypto::CryptoTypePublicPair;
@@ -179,7 +179,7 @@ where
 		};
 		let topology = AuthorityStar::new(
 			mixnet_config.local_id.clone(),
-			PeerId::from_public_key(&network_identity.public()),
+			NetworkPeerId::from_public_key(&network_identity.public()),
 			mixnet_config.public_key.clone(),
 			key_store.clone(),
 			&mixnet_config,
@@ -537,7 +537,7 @@ where
 /// that are part of the topology.
 pub struct AuthorityStar {
 	local_id: MixPeerId,
-	network_id: PeerId,
+	network_id: NetworkPeerId,
 	node_public_key: MixPublicKey,
 	key_store: Arc<dyn SyncCryptoStore>,
 	// true when we are in authorities set.
@@ -577,7 +577,7 @@ impl AuthorityStar {
 	/// Instantiate a new topology.
 	pub fn new(
 		local_id: MixPeerId,
-		network_id: PeerId,
+		network_id: NetworkPeerId,
 		node_public_key: MixPublicKey,
 		key_store: Arc<dyn SyncCryptoStore>,
 		config: &Config,
@@ -944,7 +944,7 @@ impl Topology for AuthorityStar {
 	fn check_handshake(
 		&mut self,
 		payload: &[u8],
-		_from: &PeerId,
+		_from: &NetworkPeerId,
 	) -> Option<(MixPeerId, MixPublicKey)> {
 		let mut peer_id = [0u8; 32];
 		peer_id.copy_from_slice(&payload[0..32]);
@@ -972,7 +972,7 @@ impl Topology for AuthorityStar {
 		}
 	}
 
-	fn handshake(&mut self, with: &PeerId, public_key: &MixPublicKey) -> Option<Vec<u8>> {
+	fn handshake(&mut self, with: &NetworkPeerId, public_key: &MixPublicKey) -> Option<Vec<u8>> {
 		let mut result = self.local_id.to_vec();
 		result.extend_from_slice(&public_key.as_bytes()[..]);
 		let mut message = with.to_bytes().to_vec();
