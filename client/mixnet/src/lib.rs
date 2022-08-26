@@ -160,12 +160,13 @@ where
 				.0
 		};
 
-		let mut mixnet_config = if let Some((pub_key, priv_key)) = Self::get_mixnet_keys(&*key_store) {
-			mixnet::Config::new_with_keys(local_public_key, pub_key, priv_key)
-		} else {
-			log::error!(target: "mixnet", "Not using grandpa key");
-			mixnet::Config::new(local_public_key)
-		};
+		let mut mixnet_config =
+			if let Some((pub_key, priv_key)) = Self::get_mixnet_keys(&*key_store) {
+				mixnet::Config::new_with_keys(local_public_key, pub_key, priv_key)
+			} else {
+				log::error!(target: "mixnet", "Not using grandpa key");
+				mixnet::Config::new(local_public_key)
+			};
 
 		mixnet_config.num_hops = DEFAULT_NUM_HOPS;
 
@@ -361,6 +362,7 @@ where
 		let topology = &mut self.worker.mixnet_mut().topology;
 		debug!(target: "mixnet", "Change authorities {:?}", set);
 		topology.authorities.clear();
+		topology.authorities_tables.clear();
 
 		topology.routing = false;
 
@@ -419,6 +421,59 @@ where
 				}
 			} else {
 				error!(target: "mixnet", "Missing imonline key for authority {:?}, not adding it to topology.", auth);
+			}
+		}
+
+		for (auth, public_key) in topology.authorities.iter() {
+			if auth == &topology.local_id {
+				if let Some(table) = AuthorityTopology::refresh_connection_table_to(
+					auth,
+					public_key,
+					Some(&topology.routing_table),
+					&topology.authorities,
+				) {
+					topology.routing_table = table;
+					topology.paths.clear();
+					topology.paths_depth = 0;
+				}
+			} else {
+				let past = topology.authorities_tables.get(auth);
+				if let Some(table) = AuthorityTopology::refresh_connection_table_to(
+					auth,
+					public_key,
+					past,
+					&topology.authorities,
+				) {
+					topology.authorities_tables.insert(auth.clone(), table);
+					topology.paths.clear();
+					topology.paths_depth = 0;
+				}
+			}
+		}
+		for (auth, _public_key) in topology.authorities.iter() {
+			if auth == &topology.local_id {
+				if let Some(from) = AuthorityTopology::refresh_connection_table_from(
+					auth,
+					&topology.routing_table.receive_from,
+					topology.authorities_tables.iter(),
+				) {
+					topology.routing_table.receive_from = from;
+				}
+			} else {
+				if let Some(routing_table) = topology.authorities_tables.get(auth) {
+					if let Some(from) = AuthorityTopology::refresh_connection_table_from(
+						auth,
+						&routing_table.receive_from,
+						topology
+							.authorities_tables
+							.iter()
+							.chain(std::iter::once((&topology.local_id, &topology.routing_table))),
+					) {
+						if let Some(routing_table) = topology.authorities_tables.get_mut(auth) {
+							routing_table.receive_from = from;
+						}
+					}
+				}
 			}
 		}
 
@@ -579,6 +634,7 @@ pub struct AuthorityTopology {
 	metrics: Option<metrics::MetricsHandle>,
 
 	routing_table: AuthorityTable,
+
 	authorities_tables: BTreeMap<MixPeerId, AuthorityTable>,
 	// all path of a given size.
 	// on every change to auth table this is cleared TODO make change synchronously to
@@ -591,7 +647,6 @@ pub struct AuthorityTopology {
 	// TODO could replace HashMap by vec and use indices as ptr
 	paths: BTreeMap<usize, HashMap<MixPeerId, HashMap<MixPeerId, Vec<MixPeerId>>>>,
 	paths_depth: usize,
-
 }
 
 /// Current published view of an authority routing table.
@@ -818,6 +873,44 @@ impl AuthorityTopology {
 			}
 			self.copy_connected_info_to_metrics();
 		}
+	}
+
+	fn refresh_connection_table_to(
+		from: &MixPeerId,
+		from_key: &MixPublicKey,
+		past: Option<&AuthorityTable>,
+		authorities: &BTreeMap<MixPeerId, MixPublicKey>,
+	) -> Option<AuthorityTable> {
+		let tos = AuthorityTable::should_connect_to(from, authorities, NUMBER_CONNECTED_FORWARD);
+		let mut routing_table = AuthorityTable {
+			public_key: from_key.clone(),
+			connected_to: Default::default(),
+			receive_from: Default::default(),
+		};
+		for peer in tos.into_iter() {
+			// consider all connected
+			routing_table.connected_to.insert(peer);
+			if routing_table.connected_to.len() == NUMBER_CONNECTED_FORWARD {
+				break
+			}
+		}
+
+		(past != Some(&routing_table)).then(|| routing_table)
+	}
+
+	fn refresh_connection_table_from<'a>(
+		from: &MixPeerId,
+		past: &BTreeSet<MixPeerId>,
+		authorities_tables: impl Iterator<Item = (&'a MixPeerId, &'a AuthorityTable)>,
+	) -> Option<BTreeSet<MixPeerId>> {
+		let mut receive_from = BTreeSet::default();
+		for (peer_id, table) in authorities_tables {
+			if table.connected_to.contains(from) {
+				receive_from.insert(peer_id.clone());
+			}
+		}
+
+		(past != &receive_from).then(|| receive_from)
 	}
 }
 
@@ -1699,7 +1792,7 @@ impl AuthorityTopology {
 				size += 32;
 				for paths in paths.1.iter() {
 					size += 32;
-					for paths in paths.1.iter() {
+					for _ in paths.1.iter() {
 						size += 32;
 					}
 				}
