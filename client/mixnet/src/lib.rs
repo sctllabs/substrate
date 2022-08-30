@@ -22,7 +22,7 @@
 //!
 //! Topology specific to substrate and utils to link to network.
 
-use mixnet::{Error, MixPeerId, MixPublicKey, Topology};
+use mixnet::{Error, MixPeerId, MixPublicKey, traits::Topology};
 
 pub use mixnet::{Config, SinkToWorker, StreamFromWorker};
 use sp_application_crypto::key_types;
@@ -1087,6 +1087,196 @@ fn random_path_inner(
 	None
 }
 
+impl mixnet::traits::Configuration for AuthorityTopology {
+	fn collect_windows_stats(&self) -> bool {
+		self.metrics.is_some()
+	}
+
+	fn window_stats(&self, stats: &mixnet::WindowStats) {
+		if let Some(metrics) = self.metrics.as_ref() {
+			let nb_window = stats.window - stats.last_window;
+			if nb_window == 0 {
+				return
+			}
+			metrics.number_of_window.inc();
+			for _ in 1..nb_window {
+				metrics.number_of_skipped_window.inc();
+			}
+			let max_paquets = stats.sum_connected.max_peer_paquet_queue_size as u64;
+			if metrics.max_packet_queue_for_peer.get() < max_paquets {
+				metrics.max_packet_queue_for_peer.set(max_paquets);
+			}
+			let total_peer_paquets = stats.sum_connected.peer_paquet_queue_size;
+			if self.nb_connected_forward_routing > 0 {
+				let peer_paquets =
+					total_peer_paquets as f64 / self.nb_connected_forward_routing as f64;
+				let peer_paquets = peer_paquets / nb_window as f64;
+				metrics.avg_packet_queue_size_for_peer.set(peer_paquets);
+				for _ in 0..nb_window {
+					metrics.avg_packet_queue_size_for_peer_histo.observe(peer_paquets);
+				}
+			} else {
+				metrics.avg_packet_queue_size_for_peer.set(0.0);
+			}
+			metrics.set_window_packets(
+				stats.number_received_valid,
+				nb_window,
+				PacketsKind::Received,
+				PacketsResult::Success,
+			);
+			metrics.set_window_packets(
+				stats.number_received_invalid,
+				nb_window,
+				PacketsKind::Received,
+				PacketsResult::Failure,
+			);
+			metrics.set_window_packets(
+				stats.number_from_external_received_valid,
+				nb_window,
+				PacketsKind::ReceivedExternal,
+				PacketsResult::Success,
+			);
+			metrics.set_window_packets(
+				stats.number_from_external_received_invalid,
+				nb_window,
+				PacketsKind::ReceivedExternal,
+				PacketsResult::Failure,
+			);
+			metrics.set_window_packets(
+				stats.sum_connected.number_forwarded_success,
+				nb_window,
+				PacketsKind::Forward,
+				PacketsResult::Success,
+			);
+			metrics.set_window_packets(
+				stats.sum_connected.number_forwarded_failed,
+				nb_window,
+				PacketsKind::Forward,
+				PacketsResult::Failure,
+			);
+			metrics.set_window_packets(
+				stats.sum_connected.number_from_external_forwarded_success,
+				nb_window,
+				PacketsKind::ForwardExternal,
+				PacketsResult::Success,
+			);
+			metrics.set_window_packets(
+				stats.sum_connected.number_from_external_forwarded_failed,
+				nb_window,
+				PacketsKind::ForwardExternal,
+				PacketsResult::Failure,
+			);
+			metrics.set_window_packets(
+				stats.sum_connected.number_from_self_send_success,
+				nb_window,
+				PacketsKind::FromSelf,
+				PacketsResult::Success,
+			);
+			metrics.set_window_packets(
+				stats.sum_connected.number_from_self_send_failed,
+				nb_window,
+				PacketsKind::FromSelf,
+				PacketsResult::Failure,
+			);
+			metrics.set_window_packets(
+				stats.sum_connected.number_surbs_reply_success,
+				nb_window,
+				PacketsKind::SurbsReply,
+				PacketsResult::Success,
+			);
+			metrics.set_window_packets(
+				stats.sum_connected.number_surbs_reply_failed,
+				nb_window,
+				PacketsKind::SurbsReply,
+				PacketsResult::Failure,
+			);
+			metrics.set_window_packets(
+				stats.sum_connected.number_cover_send_success,
+				nb_window,
+				PacketsKind::Cover,
+				PacketsResult::Success,
+			);
+			metrics.set_window_packets(
+				stats.sum_connected.number_cover_send_failed,
+				nb_window,
+				PacketsKind::Cover,
+				PacketsResult::Failure,
+			);
+		}
+	}
+}
+
+impl mixnet::traits::Handshake for AuthorityTopology {
+	fn handshake_size(&self) -> usize {
+		32 + 32 + 64
+	}
+
+	fn check_handshake(
+		&mut self,
+		payload: &[u8],
+		_from: &NetworkPeerId,
+	) -> Option<(MixPeerId, MixPublicKey)> {
+		let mut peer_id = [0u8; 32];
+		peer_id.copy_from_slice(&payload[0..32]);
+		let mut pk = [0u8; 32];
+		pk.copy_from_slice(&payload[32..64]);
+		let mut signature = [0u8; 64];
+		signature.copy_from_slice(&payload[64..]);
+		let signature = sp_application_crypto::sr25519::Signature(signature);
+		let mut message = self.network_id.to_bytes().to_vec();
+		message.extend_from_slice(&pk[..]);
+		let key = sp_application_crypto::sr25519::Public(peer_id.clone());
+		debug!(target: "mixnet", "check handshake: {:?}, {:?}, {:?} from {:?}", peer_id, message, signature, _from);
+		use sp_application_crypto::RuntimePublic;
+		if key.verify(&message, &signature) {
+			if !self.accept_peer(&self.local_id, &peer_id) {
+				self.metrics.as_ref().map(|m| m.invalid_handshake.inc());
+				return None
+			}
+			if self.is_routing(&peer_id) {
+				// TODO this should be checking routing table from other peer and see peers
+				// connected to multiple others so we wait for their connection or ping them.
+				// TODO One could still for big difference in the priority list try to check if
+				// online and at some point reject the peer as not being connected enough (globaly
+				// with other authorities). Number can be big initially as authority may disable
+				// mixnet a lot. TODO in case we are already receiving from more than a threshould
+				// we drop others connection.
+			}
+			let pk = MixPublicKey::from(pk);
+			self.metrics.as_ref().map(|m| m.valid_handshake.inc());
+			Some((peer_id, pk))
+		} else {
+			self.metrics.as_ref().map(|m| m.invalid_handshake.inc());
+			None
+		}
+	}
+
+	fn handshake(&mut self, with: &NetworkPeerId, public_key: &MixPublicKey) -> Option<Vec<u8>> {
+		let mut result = self.local_id.to_vec();
+		result.extend_from_slice(&public_key.as_bytes()[..]);
+		let mut message = with.to_bytes().to_vec();
+		message.extend_from_slice(&public_key.as_bytes()[..]);
+		match SyncCryptoStore::sign_with(
+			&*self.key_store,
+			key_types::IM_ONLINE,
+			&CryptoTypePublicPair(sp_core::sr25519::CRYPTO_ID, self.local_id.to_vec()),
+			&message[..],
+		) {
+			Ok(Some(signature)) => {
+				result.extend_from_slice(&signature[..]);
+				trace!(target: "mixnet", "create handshake: {:?}, {:?}, {:?} with {:?}", self.local_id, message, signature, with);
+				return Some(result)
+			},
+			Err(e) => {
+				error!(target: "mixnet", "hanshake signing error: {:?}", e);
+			},
+			_ => (),
+		}
+		error!(target: "mixnet", "Missing imonline key for handshake.");
+		None
+	}
+}
+
 impl Topology for AuthorityTopology {
 	fn first_hop_nodes_external(
 		&self,
@@ -1344,75 +1534,6 @@ impl Topology for AuthorityTopology {
 		Some((available_per_external, self.target_bytes_per_seconds))
 	}
 
-	fn handshake_size(&self) -> usize {
-		32 + 32 + 64
-	}
-
-	fn check_handshake(
-		&mut self,
-		payload: &[u8],
-		_from: &NetworkPeerId,
-	) -> Option<(MixPeerId, MixPublicKey)> {
-		let mut peer_id = [0u8; 32];
-		peer_id.copy_from_slice(&payload[0..32]);
-		let mut pk = [0u8; 32];
-		pk.copy_from_slice(&payload[32..64]);
-		let mut signature = [0u8; 64];
-		signature.copy_from_slice(&payload[64..]);
-		let signature = sp_application_crypto::sr25519::Signature(signature);
-		let mut message = self.network_id.to_bytes().to_vec();
-		message.extend_from_slice(&pk[..]);
-		let key = sp_application_crypto::sr25519::Public(peer_id.clone());
-		debug!(target: "mixnet", "check handshake: {:?}, {:?}, {:?} from {:?}", peer_id, message, signature, _from);
-		use sp_application_crypto::RuntimePublic;
-		if key.verify(&message, &signature) {
-			if !self.accept_peer(&self.local_id, &peer_id) {
-				self.metrics.as_ref().map(|m| m.invalid_handshake.inc());
-				return None
-			}
-			if self.is_routing(&peer_id) {
-				// TODO this should be checking routing table from other peer and see peers
-				// connected to multiple others so we wait for their connection or ping them.
-				// TODO One could still for big difference in the priority list try to check if
-				// online and at some point reject the peer as not being connected enough (globaly
-				// with other authorities). Number can be big initially as authority may disable
-				// mixnet a lot. TODO in case we are already receiving from more than a threshould
-				// we drop others connection.
-			}
-			let pk = MixPublicKey::from(pk);
-			self.metrics.as_ref().map(|m| m.valid_handshake.inc());
-			Some((peer_id, pk))
-		} else {
-			self.metrics.as_ref().map(|m| m.invalid_handshake.inc());
-			None
-		}
-	}
-
-	fn handshake(&mut self, with: &NetworkPeerId, public_key: &MixPublicKey) -> Option<Vec<u8>> {
-		let mut result = self.local_id.to_vec();
-		result.extend_from_slice(&public_key.as_bytes()[..]);
-		let mut message = with.to_bytes().to_vec();
-		message.extend_from_slice(&public_key.as_bytes()[..]);
-		match SyncCryptoStore::sign_with(
-			&*self.key_store,
-			key_types::IM_ONLINE,
-			&CryptoTypePublicPair(sp_core::sr25519::CRYPTO_ID, self.local_id.to_vec()),
-			&message[..],
-		) {
-			Ok(Some(signature)) => {
-				result.extend_from_slice(&signature[..]);
-				trace!(target: "mixnet", "create handshake: {:?}, {:?}, {:?} with {:?}", self.local_id, message, signature, with);
-				return Some(result)
-			},
-			Err(e) => {
-				error!(target: "mixnet", "hanshake signing error: {:?}", e);
-			},
-			_ => (),
-		}
-		error!(target: "mixnet", "Missing imonline key for handshake.");
-		None
-	}
-
 	fn accept_peer(&self, local_id: &MixPeerId, peer_id: &MixPeerId) -> bool {
 		let accepted = self.routing_to(local_id, peer_id) ||
 			self.routing_to(peer_id, local_id) ||
@@ -1422,123 +1543,6 @@ impl Topology for AuthorityTopology {
 			self.metrics.as_ref().map(|m| m.rejected_external.inc());
 		}
 		accepted
-	}
-
-	fn collect_windows_stats(&self) -> bool {
-		self.metrics.is_some()
-	}
-
-	fn window_stats(&self, stats: &mixnet::WindowStats) {
-		if let Some(metrics) = self.metrics.as_ref() {
-			let nb_window = stats.window - stats.last_window;
-			if nb_window == 0 {
-				return
-			}
-			metrics.number_of_window.inc();
-			for _ in 1..nb_window {
-				metrics.number_of_skipped_window.inc();
-			}
-			let max_paquets = stats.sum_connected.max_peer_paquet_queue_size as u64;
-			if metrics.max_packet_queue_for_peer.get() < max_paquets {
-				metrics.max_packet_queue_for_peer.set(max_paquets);
-			}
-			let total_peer_paquets = stats.sum_connected.peer_paquet_queue_size;
-			if self.nb_connected_forward_routing > 0 {
-				let peer_paquets =
-					total_peer_paquets as f64 / self.nb_connected_forward_routing as f64;
-				let peer_paquets = peer_paquets / nb_window as f64;
-				metrics.avg_packet_queue_size_for_peer.set(peer_paquets);
-				for _ in 0..nb_window {
-					metrics.avg_packet_queue_size_for_peer_histo.observe(peer_paquets);
-				}
-			} else {
-				metrics.avg_packet_queue_size_for_peer.set(0.0);
-			}
-			metrics.set_window_packets(
-				stats.number_received_valid,
-				nb_window,
-				PacketsKind::Received,
-				PacketsResult::Success,
-			);
-			metrics.set_window_packets(
-				stats.number_received_invalid,
-				nb_window,
-				PacketsKind::Received,
-				PacketsResult::Failure,
-			);
-			metrics.set_window_packets(
-				stats.number_from_external_received_valid,
-				nb_window,
-				PacketsKind::ReceivedExternal,
-				PacketsResult::Success,
-			);
-			metrics.set_window_packets(
-				stats.number_from_external_received_invalid,
-				nb_window,
-				PacketsKind::ReceivedExternal,
-				PacketsResult::Failure,
-			);
-			metrics.set_window_packets(
-				stats.sum_connected.number_forwarded_success,
-				nb_window,
-				PacketsKind::Forward,
-				PacketsResult::Success,
-			);
-			metrics.set_window_packets(
-				stats.sum_connected.number_forwarded_failed,
-				nb_window,
-				PacketsKind::Forward,
-				PacketsResult::Failure,
-			);
-			metrics.set_window_packets(
-				stats.sum_connected.number_from_external_forwarded_success,
-				nb_window,
-				PacketsKind::ForwardExternal,
-				PacketsResult::Success,
-			);
-			metrics.set_window_packets(
-				stats.sum_connected.number_from_external_forwarded_failed,
-				nb_window,
-				PacketsKind::ForwardExternal,
-				PacketsResult::Failure,
-			);
-			metrics.set_window_packets(
-				stats.sum_connected.number_from_self_send_success,
-				nb_window,
-				PacketsKind::FromSelf,
-				PacketsResult::Success,
-			);
-			metrics.set_window_packets(
-				stats.sum_connected.number_from_self_send_failed,
-				nb_window,
-				PacketsKind::FromSelf,
-				PacketsResult::Failure,
-			);
-			metrics.set_window_packets(
-				stats.sum_connected.number_surbs_reply_success,
-				nb_window,
-				PacketsKind::SurbsReply,
-				PacketsResult::Success,
-			);
-			metrics.set_window_packets(
-				stats.sum_connected.number_surbs_reply_failed,
-				nb_window,
-				PacketsKind::SurbsReply,
-				PacketsResult::Failure,
-			);
-			metrics.set_window_packets(
-				stats.sum_connected.number_cover_send_success,
-				nb_window,
-				PacketsKind::Cover,
-				PacketsResult::Success,
-			);
-			metrics.set_window_packets(
-				stats.sum_connected.number_cover_send_failed,
-				nb_window,
-				PacketsKind::Cover,
-				PacketsResult::Failure,
-			);
-		}
 	}
 }
 
