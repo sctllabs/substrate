@@ -399,7 +399,6 @@ where
 								error!(target: "mixnet", "Error changing local id in metrics {:?}", e);
 							}
 						});
-						topology.local_id = peer_id;
 						peer_id
 					});
 					let new_key = (current_public_key != public_key)
@@ -561,8 +560,6 @@ where
 /// When sending a message, the message can only reach nodes
 /// that are part of the topology.
 pub struct AuthorityTopology {
-	// MixPeerId is ImOnline key.
-	local_id: MixPeerId,
 	network_id: NetworkPeerId,
 	key_store: Arc<dyn SyncCryptoStore>,
 
@@ -590,6 +587,7 @@ impl AuthorityTopology {
 		metrics: Option<metrics::MetricsHandle>,
 	) -> Self {
 		let topo = TopologyHashTable::new(
+			// MixPeerId is ImOnline key.
 			local_id,
 			node_public_key,
 			config,
@@ -597,14 +595,7 @@ impl AuthorityTopology {
 			(),
 		);
 
-		AuthorityTopology {
-			local_id,
-			network_id,
-			sessions: HashMap::new(),
-			topo,
-			key_store,
-			metrics,
-		}
+		AuthorityTopology { network_id, sessions: HashMap::new(), topo, key_store, metrics }
 	}
 
 	fn copy_connected_info_to_metrics(&self) {
@@ -775,7 +766,7 @@ impl mixnet::traits::Handshake for AuthorityTopology {
 		debug!(target: "mixnet", "check handshake: {:?}, {:?}, {:?} from {:?}", peer_id, message, signature, _from);
 		use sp_application_crypto::RuntimePublic;
 		if key.verify(&message, &signature) {
-			if !self.accept_peer(&self.local_id, &peer_id) {
+			if !self.accept_peer(self.topo.local_id(), &peer_id) {
 				self.metrics.as_ref().map(|m| m.invalid_handshake.inc());
 				return None
 			}
@@ -798,19 +789,19 @@ impl mixnet::traits::Handshake for AuthorityTopology {
 	}
 
 	fn handshake(&mut self, with: &NetworkPeerId, public_key: &MixPublicKey) -> Option<Vec<u8>> {
-		let mut result = self.local_id.to_vec();
+		let mut result = self.topo.local_id().to_vec();
 		result.extend_from_slice(&public_key.as_bytes()[..]);
 		let mut message = with.to_bytes().to_vec();
 		message.extend_from_slice(&public_key.as_bytes()[..]);
 		match SyncCryptoStore::sign_with(
 			&*self.key_store,
 			key_types::IM_ONLINE,
-			&CryptoTypePublicPair(sp_core::sr25519::CRYPTO_ID, self.local_id.to_vec()),
+			&CryptoTypePublicPair(sp_core::sr25519::CRYPTO_ID, self.topo.local_id().to_vec()),
 			&message[..],
 		) {
 			Ok(Some(signature)) => {
 				result.extend_from_slice(&signature[..]);
-				trace!(target: "mixnet", "create handshake: {:?}, {:?}, {:?} with {:?}", self.local_id, message, signature, with);
+				trace!(target: "mixnet", "create handshake: {:?}, {:?}, {:?} with {:?}", self.topo.local_id(), message, signature, with);
 				return Some(result)
 			},
 			Err(e) => {
