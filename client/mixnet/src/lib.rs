@@ -49,7 +49,7 @@ pub use sp_finality_grandpa::{AuthorityId, AuthorityList, SetId};
 use sp_runtime::traits::{Block as BlockT, Header, NumberFor};
 use sp_session::CurrentSessionKeys;
 use std::{
-	collections::{BTreeSet, HashMap, HashSet},
+	collections::{HashMap, HashSet},
 	sync::Arc,
 	time::Duration,
 };
@@ -199,9 +199,9 @@ where
 		};
 
 		let topology = AuthorityTopology::new(
-			mixnet_config.local_id.clone(),
+			mixnet_config.local_id,
 			NetworkPeerId::from_public_key(&network_identity.public()),
-			mixnet_config.public_key.clone(),
+			mixnet_config.public_key,
 			key_store.clone(),
 			&mixnet_config,
 			metrics,
@@ -228,11 +228,11 @@ where
 		// get last key, if it is not the right one, node will restart on next
 		// handle_new_authority call.
 		let mut grandpa_key = None;
-		for key in SyncCryptoStore::ed25519_public_keys(&*key_store, key_types::GRANDPA)
+		for key in SyncCryptoStore::ed25519_public_keys(key_store, key_types::GRANDPA)
 			.into_iter()
 			.rev()
 		{
-			if SyncCryptoStore::has_keys(&*key_store, &[(key.0.into(), key_types::GRANDPA)]) {
+			if SyncCryptoStore::has_keys(key_store, &[(key.0.into(), key_types::GRANDPA)]) {
 				grandpa_key = Some(key);
 				break
 			} else {
@@ -246,7 +246,7 @@ where
 			let pub_key = mixnet::public_from_ed25519(p);
 
 			let priv_key = SyncCryptoStore::mixnet_secret_from_ed25519(
-				&*key_store,
+				key_store,
 				key_types::GRANDPA,
 				&grandpa_key,
 			)
@@ -370,8 +370,8 @@ where
 
 		self.fetch_new_session_keys(at, session);
 		self.update_own_public_key_within_authority_set(&set);
-		let current_local_id = self.worker.local_id().clone();
-		let current_public_key = self.worker.public_key().clone();
+		let current_local_id = *self.worker.local_id();
+		let current_public_key = *self.worker.public_key();
 		let topology = &mut self.worker.mixnet_mut().topology;
 		debug!(target: "mixnet", "Change authorities {:?}", set);
 
@@ -391,7 +391,7 @@ where
 
 				if self.authority_id.as_ref() == Some(&auth) {
 					debug!(target: "mixnet", "Insert self {:?}", peer_id);
-					routing_set.push((peer_id, public_key.clone()));
+					routing_set.push((peer_id, public_key));
 					// Use ImOnline for the current session.
 					let new_id = (current_local_id != peer_id).then(|| {
 						topology.metrics.as_mut().map(|m| {
@@ -399,8 +399,8 @@ where
 								error!(target: "mixnet", "Error changing local id in metrics {:?}", e);
 							}
 						});
-						topology.local_id = peer_id.clone();
-						peer_id.clone()
+						topology.local_id = peer_id;
+						peer_id
 					});
 					let new_key = (current_public_key != public_key)
 						.then(|| {
@@ -412,7 +412,7 @@ where
 							)
 							.ok()?;
 
-							Some((public_key.clone(), new_key))
+							Some((public_key, new_key))
 						})
 						.flatten();
 					if new_id.is_some() && new_key.is_none() {
@@ -425,7 +425,7 @@ where
 					}
 				} else {
 					debug!(target: "mixnet", "Insert auth {:?}", peer_id);
-					routing_set.push((peer_id, public_key.clone()));
+					routing_set.push((peer_id, public_key));
 				}
 			} else {
 				error!(target: "mixnet", "Missing imonline key for authority {:?}, not adding it to topology.", auth);
@@ -434,8 +434,8 @@ where
 
 		let new_self = restart
 			.as_ref()
-			.map(|(new_id, new_key)| (new_id.clone(), new_key.as_ref().map(|pair| pair.0.clone())));
-		topology.topo.handle_new_routing_set(routing_set.into_iter(), new_self, ());
+			.map(|(new_id, new_key)| (*new_id, new_key.as_ref().map(|pair| pair.0)));
+		topology.topo.handle_new_routing_set(&routing_set[..], new_self);
 
 		if let Some((id, key)) = restart {
 			debug!(target: "mixnet", "Restarting");
@@ -573,28 +573,6 @@ pub struct AuthorityTopology {
 	metrics: Option<metrics::MetricsHandle>,
 }
 
-/// Current published view of an authority routing table.
-///
-/// Table is currently signed by ImOnline key.
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct AuthorityTable {
-	public_key: MixPublicKey,
-	// TODO could put revision but change will be more costy to converge.
-	// TODO or put revision in dht key, then on handshake you also pass revision and then crawl
-	// over updates -> I kinda like that.
-	// Actually would be easier with a `known_latest_revision` field with all known latest revision
-	// so peers can easilly resolve dht key and next dht key (if none found, can still query from
-	// 0). -> requires outside a Map MixPeerId to latest received revision, so we query other key.
-	// Interesting in the sense we have one key on value, but would need to change a bit the dht
-	// logic. -> actually may not be proper idea, one key and subsequent update, just need to
-	// ensure we are using the latest version which for signed info is easy: ord (sessionid,
-	// revision).
-	// TODO could replace MixPeerId by index in list of authorities for compactness.
-	connected_to: BTreeSet<MixPeerId>,
-	receive_from: BTreeSet<MixPeerId>, /* incoming peer needed to check if published information
-	                                    * is fresh. */
-}
-
 #[derive(Clone)]
 pub struct AuthorityInfo {
 	pub grandpa_id: AuthorityId,
@@ -612,8 +590,8 @@ impl AuthorityTopology {
 		metrics: Option<metrics::MetricsHandle>,
 	) -> Self {
 		let topo = TopologyHashTable::new(
-			local_id.clone(),
-			node_public_key.clone(),
+			local_id,
+			node_public_key,
 			config,
 			TopoConfig::DEFAULT_PARAMETERS.clone(),
 			(),
@@ -793,7 +771,7 @@ impl mixnet::traits::Handshake for AuthorityTopology {
 		let signature = sp_application_crypto::sr25519::Signature(signature);
 		let mut message = self.network_id.to_bytes().to_vec();
 		message.extend_from_slice(&pk[..]);
-		let key = sp_application_crypto::sr25519::Public(peer_id.clone());
+		let key = sp_application_crypto::sr25519::Public(peer_id);
 		debug!(target: "mixnet", "check handshake: {:?}, {:?}, {:?} from {:?}", peer_id, message, signature, _from);
 		use sp_application_crypto::RuntimePublic;
 		if key.verify(&message, &signature) {
@@ -909,6 +887,10 @@ impl Topology for AuthorityTopology {
 
 	fn bandwidth_external(&self, peer_id: &MixPeerId) -> Option<(usize, usize)> {
 		self.topo.bandwidth_external(peer_id)
+	}
+
+	fn accept_peer(&self, local_id: &MixPeerId, peer_id: &MixPeerId) -> bool {
+		self.topo.accept_peer(local_id, peer_id)
 	}
 }
 

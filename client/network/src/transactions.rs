@@ -125,9 +125,7 @@ impl<H: ExHashT> Future for PendingTransaction<H> {
 
 		if let Poll::Ready(import_result) = Pin::new(&mut this.validation).poll_unpin(cx) {
 			let is_from_mixnet = this.mixnet.is_some();
-			if let Some((mut reply, surb)) =
-				this.mixnet.as_mut().map(|reply| reply.take()).flatten()
-			{
+			if let Some((mut reply, surb)) = this.mixnet.as_mut().and_then(|reply| reply.take()) {
 				trace!(target: "mixnet", "Import result from mixnet tx {:?}", import_result);
 				let import_result = match import_result {
 					TransactionImport::KnownGood => MixnetImportResult::Success,
