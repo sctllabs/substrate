@@ -49,16 +49,12 @@ pub use sp_finality_grandpa::{AuthorityId, AuthorityList, SetId};
 use sp_runtime::traits::{Block as BlockT, Header, NumberFor};
 use sp_session::CurrentSessionKeys;
 use std::{
-	collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+	collections::{BTreeSet, HashMap, HashSet},
 	sync::Arc,
 	time::Duration,
 };
 
-/// Minimal number of node for accepting to add new message.
-const LOW_MIXNET_THRESHOLD: usize = 5;
-
-/// Minimal number of paths for sending to recipient.
-const LOW_MIXNET_PATHS: usize = 2;
+const DEFAULT_NUM_HOPS: u32 = 4;
 
 // Buffer size for mixnet command channel.
 const COMMAND_BUFFER_SIZE: usize = 25;
@@ -70,13 +66,6 @@ const UNSYNCH_FINALIZED_MARGIN: u32 = 10;
 /// Delay in seconds after which if no finalization occurs,
 /// we switch back to synching state.
 const DELAY_NO_FINALISATION_S: u64 = 60;
-
-/// Maximum number of external node.
-const MAX_EXTERNAL: usize = 10;
-
-/// Percent of additional bandwidth allowed for external
-/// node message reception.
-const EXTERNAL_BANDWIDTH: (usize, usize) = (1, 10);
 
 struct TopoConfig;
 
@@ -215,7 +204,6 @@ where
 			mixnet_config.public_key.clone(),
 			key_store.clone(),
 			&mixnet_config,
-			Some(10),
 			metrics,
 		);
 
@@ -411,7 +399,7 @@ where
 								error!(target: "mixnet", "Error changing local id in metrics {:?}", e);
 							}
 						});
-						topology.local_id = peer_id.clone(); // TODO check if local id can be remove??
+						topology.local_id = peer_id.clone();
 						peer_id.clone()
 					});
 					let new_key = (current_public_key != public_key)
@@ -423,8 +411,6 @@ where
 								&auth.into(),
 							)
 							.ok()?;
-
-							// TODO may need public key at config level?
 
 							Some((public_key.clone(), new_key))
 						})
@@ -609,79 +595,6 @@ pub struct AuthorityTable {
 	                                    * is fresh. */
 }
 
-// TODO more but this is ok for testing on a 6 authority network.
-// TODO put in config.
-const NUMBER_CONNECTED_FORWARD: usize = 4;
-
-const DEFAULT_NUM_HOPS: u32 = 4;
-
-// should statically be NUMBER_CONNECTED_BACKWARD, but applying a small variation margin.
-const NUMBER_CONNECTED_BACKWARD: usize = NUMBER_CONNECTED_FORWARD - 2;
-
-impl AuthorityTable {
-	fn should_connect_to<D>(
-		from: &MixPeerId,
-		authorities: &BTreeMap<MixPeerId, D>,
-		nb: usize,
-	) -> Vec<MixPeerId> {
-		// TODO cache common seed when all_auth got init
-		let mut common_seed = [0u8; 32];
-		for auth in authorities.iter() {
-			let hash = sp_core::hashing::blake2_256(auth.0);
-			for i in 0..32 {
-				common_seed[i] ^= hash[i];
-			}
-		}
-		let mut hash = sp_core::hashing::blake2_256(from);
-		for i in 0..32 {
-			hash[i] ^= common_seed[i];
-		}
-
-		let mut auths: Vec<_> = authorities
-			.iter()
-			.filter_map(|a| if a.0 != from { Some(a.0) } else { None })
-			.collect();
-		let mut nb_auth = auths.len();
-		let mut result = Vec::with_capacity(std::cmp::min(nb, nb_auth));
-		let mut cursor = 0;
-		while result.len() < nb && nb_auth > 0 {
-			// TODO bit arith
-			let mut nb_bytes = match nb_auth {
-				nb_auth if nb_auth <= u8::MAX as usize => 1,
-				nb_auth if nb_auth <= u16::MAX as usize => 2,
-				nb_auth if nb_auth < 1usize << 24 => 3,
-				nb_auth if nb_auth < u32::MAX as usize => 4,
-				_ => unimplemented!(),
-			};
-			let mut at = 0usize;
-			loop {
-				if let Some(next) = hash.get(cursor) {
-					nb_bytes -= 1;
-					at += (*next as usize) * (1usize << (8 * nb_bytes));
-					cursor += 1;
-					if nb_bytes == 0 {
-						break
-					}
-				} else {
-					cursor = 0;
-					hash = sp_core::hashing::blake2_256(&hash);
-				}
-			}
-			at = at % nb_auth;
-			result.push(auths.remove(at).clone());
-			nb_auth = auths.len();
-		}
-		result
-	}
-}
-
-enum ConnectedKind {
-	External,
-	RoutingForward,
-	RoutingReceive,
-	RoutingReceiveForward,
-}
-
 #[derive(Clone)]
 pub struct AuthorityInfo {
 	pub grandpa_id: AuthorityId,
@@ -696,7 +609,6 @@ impl AuthorityTopology {
 		node_public_key: MixPublicKey,
 		key_store: Arc<dyn SyncCryptoStore>,
 		config: &Config,
-		max_external: Option<usize>,
 		metrics: Option<metrics::MetricsHandle>,
 	) -> Self {
 		let topo = TopologyHashTable::new(
@@ -706,11 +618,6 @@ impl AuthorityTopology {
 			TopoConfig::DEFAULT_PARAMETERS.clone(),
 			(),
 		);
-		let routing_table = AuthorityTable {
-			public_key: node_public_key,
-			connected_to: BTreeSet::new(),
-			receive_from: BTreeSet::new(),
-		};
 
 		AuthorityTopology {
 			local_id,
@@ -745,44 +652,6 @@ impl AuthorityTopology {
 				])
 				.set(self.topo.nb_connected_external as u64);
 		});
-	}
-
-	fn refresh_connection_table_to(
-		from: &MixPeerId,
-		from_key: &MixPublicKey,
-		past: Option<&AuthorityTable>,
-		authorities: &BTreeMap<MixPeerId, MixPublicKey>,
-	) -> Option<AuthorityTable> {
-		let tos = AuthorityTable::should_connect_to(from, authorities, NUMBER_CONNECTED_FORWARD);
-		let mut routing_table = AuthorityTable {
-			public_key: from_key.clone(),
-			connected_to: Default::default(),
-			receive_from: Default::default(),
-		};
-		for peer in tos.into_iter() {
-			// consider all connected
-			routing_table.connected_to.insert(peer);
-			if routing_table.connected_to.len() == NUMBER_CONNECTED_FORWARD {
-				break
-			}
-		}
-
-		(past != Some(&routing_table)).then(|| routing_table)
-	}
-
-	fn refresh_connection_table_from<'a>(
-		from: &MixPeerId,
-		past: &BTreeSet<MixPeerId>,
-		authorities_tables: impl Iterator<Item = (&'a MixPeerId, &'a AuthorityTable)>,
-	) -> Option<BTreeSet<MixPeerId>> {
-		let mut receive_from = BTreeSet::default();
-		for (peer_id, table) in authorities_tables {
-			if table.connected_to.contains(from) {
-				receive_from.insert(peer_id.clone());
-			}
-		}
-
-		(past != &receive_from).then(|| receive_from)
 	}
 }
 
@@ -1277,187 +1146,4 @@ mod metrics {
 				.observe(nb_packets as f64);
 		}
 	}
-}
-
-impl AuthorityTopology {
-	#[cfg(test)]
-	fn paths_mem_size(
-		paths: &BTreeMap<usize, HashMap<MixPeerId, HashMap<MixPeerId, Vec<MixPeerId>>>>,
-	) -> usize {
-		// approximate and slow, just to get idea in test. TODO update when switching paths to use
-		// indexes as ptr.
-		let mut size = 0;
-		for paths in paths.iter() {
-			size += 8; // usize
-			for paths in paths.1.iter() {
-				size += 32;
-				for paths in paths.1.iter() {
-					size += 32;
-					for _ in paths.1.iter() {
-						size += 32;
-					}
-				}
-			}
-		}
-		size
-	}
-
-	// TODO Note that building this is rather brutal, could just make some
-	// random selection already to reduce size (and refresh after x uses).
-	fn fill_paths(
-		local_id: &MixPeerId,
-		local_routing: &AuthorityTable,
-		paths: &mut BTreeMap<usize, HashMap<MixPeerId, HashMap<MixPeerId, Vec<MixPeerId>>>>,
-		paths_depth: &mut usize,
-		authorities_tables: &BTreeMap<MixPeerId, AuthorityTable>,
-		depth: usize,
-	) {
-		if &depth <= paths_depth {
-			return
-		}
-		// TODO not strictly needed (all in authorities_tables), convenient to exclude local id..
-		//		let mut from_to = HashMap::<MixPeerId, Vec<MixPeerId>>::new();
-		// TODO not strictly needed (all in authorities_tables), convenient to exclude local id.
-		let mut to_from = HashMap::<MixPeerId, Vec<MixPeerId>>::new();
-
-		for (from, table) in
-			authorities_tables.iter().chain(std::iter::once((local_id, local_routing)))
-		{
-			// TODO change if limitting size of receive_from
-			to_from.insert(from.clone(), table.receive_from.iter().cloned().collect());
-		}
-
-		Self::fill_paths_inner(to_from, paths, *paths_depth, depth);
-		if *paths_depth < depth {
-			*paths_depth = depth;
-		}
-	}
-
-	fn fill_paths_inner(
-		to_from: HashMap<MixPeerId, Vec<MixPeerId>>,
-		paths: &mut BTreeMap<usize, HashMap<MixPeerId, HashMap<MixPeerId, Vec<MixPeerId>>>>,
-		paths_depth: usize,
-		depth: usize,
-	) {
-		let mut start_depth = std::cmp::max(2, paths_depth);
-		while start_depth < depth {
-			let depth = start_depth + 1;
-			if start_depth == 2 {
-				let at = paths.entry(depth).or_default();
-				for (to, mid) in to_from.iter() {
-					let depth_paths: &mut HashMap<MixPeerId, Vec<MixPeerId>> =
-						at.entry(to.clone()).or_default();
-					for mid in mid {
-						if let Some(parents) = to_from.get(mid) {
-							for from in parents.iter() {
-								// avoid two identical node locally (paths still contains
-								// redundant node in some of its paths but being
-								// distributed in a balanced way we will just avoid those
-								// on each hop random calculation.
-								if from == to {
-									continue
-								}
-								depth_paths.entry(from.clone()).or_default().push(mid.clone());
-							}
-						}
-					}
-				}
-			} else {
-				let at = paths.entry(start_depth).or_default();
-				let mut dest_at = HashMap::<MixPeerId, HashMap<MixPeerId, Vec<MixPeerId>>>::new();
-				for (to, paths_to) in at.iter() {
-					let depth_paths = dest_at.entry(to.clone()).or_default();
-					for (mid, _) in paths_to.iter() {
-						if let Some(parents) = to_from.get(mid) {
-							for from in parents.iter() {
-								if from == to {
-									continue
-								}
-								depth_paths.entry(from.clone()).or_default().push(mid.clone());
-							}
-						}
-					}
-				}
-				paths.insert(depth, dest_at);
-			}
-			start_depth += 1;
-		}
-	}
-}
-
-#[test]
-fn test_fill_paths() {
-	/*let nb_peers: u16 = 1000;
-	let nb_forward = 10;
-	let depth = 5;*/
-	let nb_peers: u16 = 5;
-	let nb_forward = 3;
-	let depth = 4;
-
-	let peers: Vec<[u8; 32]> = (0..nb_peers)
-		.map(|i| {
-			let mut id = [0u8; 32];
-			id[0] = (i % 8) as u8;
-			id[1] = (i / 8) as u8;
-			id
-		})
-		.collect();
-	let local_id = [255u8; 32];
-	let authorities: BTreeMap<_, _> = peers
-		.iter()
-		.chain(std::iter::once(&local_id))
-		.map(|p| (p.clone(), ()))
-		.collect();
-
-	/*	let from_to: HashMap<MixPeerId, Vec<MixPeerId>> = vec![
-		(peers[0].clone(), vec![peers[1].clone(), peers[2].clone()]),
-		(peers[1].clone(), vec![peers[3].clone(), peers[4].clone()]),
-		(peers[2].clone(), vec![peers[0].clone(), peers[4].clone()]),
-	]
-	.into_iter()
-	.collect();*/
-
-	let mut from_to: HashMap<MixPeerId, Vec<MixPeerId>> = Default::default();
-	for p in peers.iter().chain(std::iter::once(&local_id)) {
-		let tos = AuthorityTable::should_connect_to(p, &authorities, nb_forward);
-		from_to.insert(p.clone(), tos);
-	}
-	let mut to_from: HashMap<MixPeerId, Vec<MixPeerId>> = Default::default();
-	//	let from_to2: BTreeMap<_, _> = from_to.iter().map(|(k, v)|(k.clone(), v.clone())).collect();
-	for (from, tos) in from_to.iter() {
-		for to in tos.iter() {
-			to_from.entry(to.clone()).or_default().push(from.clone());
-		}
-	}
-	//		let from_to = from_to.clone();
-	//		let to_from = to_from.clone();
-	let mut paths = BTreeMap::new();
-	let paths_depth = 0;
-	AuthorityTopology::fill_paths_inner(to_from, &mut paths, paths_depth, depth);
-	//	println!("{:?}", paths);
-	println!("size {:?}", AuthorityTopology::paths_mem_size(&paths));
-
-	// there is a path but cycle on 0 (depth 4)
-	//	assert!(random_path(&paths, &peers[0], &peers[1], depth).is_none());
-	let nb_path = count_paths(&paths, &local_id, &peers[1], depth);
-	println!("nb_path {:?}", nb_path);
-	let path = random_path(&paths, &local_id, &peers[1], depth);
-	if path.is_none() {
-		assert_eq!(nb_path, 0);
-	}
-	println!("{:?}", path);
-	let mut nb_reachable = 0;
-	let mut med_nb_con = 0;
-	for i in 1..nb_peers as usize {
-		let path = random_path(&paths, &peers[0], &peers[i], depth);
-		if path.is_some() {
-			nb_reachable += 1;
-		}
-		let nb_path = count_paths(&paths, &peers[0], &peers[i], depth);
-		med_nb_con += nb_path;
-	}
-	let med_nb_con = med_nb_con as f64 / (nb_peers as f64 - 1.0);
-	let reachable = nb_reachable as f64 / (nb_peers as f64 - 1.0);
-	println!("Reachable {:?}, Med nb {:?}", reachable, med_nb_con);
-	panic!("to print");
 }
