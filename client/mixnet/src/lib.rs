@@ -581,39 +581,10 @@ pub struct AuthorityTopology {
 	key_store: Arc<dyn SyncCryptoStore>,
 
 	topo: TopologyHashTable<TopoConfig>,
-	// true when we are in authorities set.
-	routing: bool,
-	nb_connected_forward_routing: usize,
-	nb_connected_receive_routing: usize,
-	nb_connected_external: usize,
-	// All authorities are considered connected (when building message except first hop).
-	authorities: BTreeMap<MixPeerId, MixPublicKey>, // TODO mixpublic key out of routing table??
-	// The connected nodes (for first hop use `authorities` joined `connected_nodes`).
-	connected_nodes: HashMap<MixPeerId, ConnectedKind>,
 	// Current session mapping of Grandpa key to IMonline key.
 	sessions: HashMap<CryptoTypePublicPair, CryptoTypePublicPair>,
 
-	target_bytes_per_seconds: usize,
-
-	// limit to external connection
-	max_external: Option<usize>,
-
 	metrics: Option<metrics::MetricsHandle>,
-
-	routing_table: AuthorityTable,
-
-	authorities_tables: BTreeMap<MixPeerId, AuthorityTable>,
-	// all path of a given size.
-	// on every change to auth table this is cleared TODO make change synchronously to
-	// avoid full calc every time.
-	//
-	// This assume topology is balanced, so we can just run random selection at each hop.
-	// TODO check topology balancing and balance if needed (keeping only peers with right incoming
-	// and outgoing?)
-	// TODO find something better
-	// TODO could replace HashMap by vec and use indices as ptr
-	paths: BTreeMap<usize, HashMap<MixPeerId, HashMap<MixPeerId, Vec<MixPeerId>>>>,
-	paths_depth: usize,
 }
 
 /// Current published view of an authority routing table.
@@ -744,22 +715,9 @@ impl AuthorityTopology {
 		AuthorityTopology {
 			local_id,
 			network_id,
-			authorities: BTreeMap::new(),
-			connected_nodes: HashMap::new(),
 			sessions: HashMap::new(),
-			routing: false,
 			topo,
 			key_store,
-			authorities_tables: BTreeMap::new(),
-			routing_table,
-			paths: Default::default(),
-			paths_depth: 0,
-			//disconnected_in_routing: Default::default(),
-			nb_connected_forward_routing: 0,
-			nb_connected_receive_routing: 0,
-			nb_connected_external: 0,
-			target_bytes_per_seconds: config.target_bytes_per_second as usize,
-			max_external,
 			metrics,
 		}
 	}
@@ -770,77 +728,23 @@ impl AuthorityTopology {
 				.with_label_values(&[
 					metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::Total as usize]
 				])
-				.set(self.connected_nodes.len() as u64);
+				.set(self.topo.connected_nodes.len() as u64);
 			m.current_connected
 				.with_label_values(&[
 					metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::Forwarding as usize]
 				])
-				.set(self.nb_connected_forward_routing as u64);
+				.set(self.topo.nb_connected_forward_routing as u64);
 			m.current_connected
 				.with_label_values(&[
 					metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::Receiving as usize]
 				])
-				.set(self.nb_connected_receive_routing as u64);
+				.set(self.topo.nb_connected_receive_routing as u64);
 			m.current_connected
 				.with_label_values(&[
 					metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::External as usize]
 				])
-				.set(self.nb_connected_external as u64);
+				.set(self.topo.nb_connected_external as u64);
 		});
-	}
-
-	fn add_connected_peer(&mut self, peer_id: MixPeerId) {
-		debug!(target: "mixnet", "Connected to mixnet {:?}", peer_id);
-		if let Some(_) = self.connected_nodes.get_mut(&peer_id) {
-			return
-		}
-		let kind = if self.is_routing(&peer_id) {
-			if !self.routing {
-				self.nb_connected_external += 1;
-				ConnectedKind::External
-			} else if self.routing_to(&self.local_id, &peer_id) {
-				self.nb_connected_forward_routing += 1;
-				if self.routing_to(&peer_id, &self.local_id) {
-					self.nb_connected_receive_routing += 1;
-					ConnectedKind::RoutingReceiveForward
-				} else {
-					ConnectedKind::RoutingForward
-				}
-			} else if self.routing_to(&peer_id, &self.local_id) {
-				self.nb_connected_receive_routing += 1;
-				ConnectedKind::RoutingReceive
-			} else {
-				self.nb_connected_external += 1;
-				ConnectedKind::External
-			}
-		} else {
-			self.nb_connected_external += 1;
-			ConnectedKind::External
-		};
-		self.connected_nodes.insert(peer_id, kind);
-		self.copy_connected_info_to_metrics();
-	}
-
-	fn add_disconnected_peer(&mut self, peer_id: &MixPeerId) {
-		debug!(target: "mixnet", "Disconnected from mixnet {:?}", peer_id);
-		if let Some(kind) = self.connected_nodes.remove(peer_id) {
-			match kind {
-				ConnectedKind::External => {
-					self.nb_connected_external -= 1;
-				},
-				ConnectedKind::RoutingReceive => {
-					self.nb_connected_receive_routing -= 1;
-				},
-				ConnectedKind::RoutingForward => {
-					self.nb_connected_forward_routing -= 1;
-				},
-				ConnectedKind::RoutingReceiveForward => {
-					self.nb_connected_forward_routing -= 1;
-					self.nb_connected_receive_routing -= 1;
-				},
-			}
-			self.copy_connected_info_to_metrics();
-		}
 	}
 
 	fn refresh_connection_table_to(
@@ -902,9 +806,9 @@ impl mixnet::traits::Configuration for AuthorityTopology {
 				metrics.max_packet_queue_for_peer.set(max_paquets);
 			}
 			let total_peer_paquets = stats.sum_connected.peer_paquet_queue_size;
-			if self.nb_connected_forward_routing > 0 {
+			if self.topo.nb_connected_forward_routing > 0 {
 				let peer_paquets =
-					total_peer_paquets as f64 / self.nb_connected_forward_routing as f64;
+					total_peer_paquets as f64 / self.topo.nb_connected_forward_routing as f64;
 				let peer_paquets = peer_paquets / nb_window as f64;
 				metrics.avg_packet_queue_size_for_peer.set(peer_paquets);
 				for _ in 0..nb_window {
