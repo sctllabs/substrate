@@ -27,13 +27,13 @@ use mixnet::{
 		hash_table::{Configuration as TopoConfigT, Parameters as TopoParams, TopologyHashTable},
 		Topology,
 	},
-	Error, MixPeerId, MixPublicKey, SendOptions, PeerStats,
+	Error, MixPeerId, MixPublicKey, PeerStats, SendOptions,
 };
 
-pub use mixnet::{Config, SinkToWorker, StreamFromWorker, ambassador_impl_Topology};
+use ambassador::Delegate;
+pub use mixnet::{ambassador_impl_Topology, Config, SinkToWorker, StreamFromWorker};
 use sp_application_crypto::key_types;
 use sp_keystore::SyncCryptoStore;
-use ambassador::Delegate;
 
 use codec::Encode;
 use futures::{future, FutureExt, StreamExt};
@@ -633,8 +633,6 @@ impl AuthorityTopology {
 					metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::Handshakes as usize]
 				])
 				.set(stats.nb_pending_handshake as u64);
-
-
 		});
 	}
 }
@@ -876,7 +874,8 @@ mod metrics {
 		Handshakes = 5,
 	}
 
-	pub const LABEL_NODE_STATUS: &[&str] = &["total", "forwarding", "receiving", "external", "consumer", "pending_handshakes"];
+	pub const LABEL_NODE_STATUS: &[&str] =
+		&["total", "forwarding", "receiving", "external", "consumer", "pending_handshakes"];
 
 	#[derive(Clone, Copy)]
 	pub enum PacketsKind {
