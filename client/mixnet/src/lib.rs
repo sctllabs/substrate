@@ -770,7 +770,7 @@ impl mixnet::traits::Handshake for AuthorityTopology {
 				self.metrics.as_ref().map(|m| m.invalid_handshake.inc());
 				return None
 			}
-			if self.is_routing(&peer_id) {
+			if self.can_route(&peer_id) {
 				// TODO this should be checking routing table from other peer and see peers
 				// connected to multiple others so we wait for their connection or ping them.
 				// TODO One could still for big difference in the priority list try to check if
@@ -858,8 +858,8 @@ impl Topology for AuthorityTopology {
 		)
 	}
 
-	fn is_routing(&self, id: &MixPeerId) -> bool {
-		self.topo.is_routing(id)
+	fn can_route(&self, id: &MixPeerId) -> bool {
+		self.topo.can_route(id)
 	}
 
 	fn connected(&mut self, peer_id: MixPeerId, key: MixPublicKey) {
