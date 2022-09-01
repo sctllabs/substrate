@@ -22,6 +22,7 @@ log = "0.4.8"
 mixnet = { git = "https://github.com/paritytech/mixnet", version = "0.1.0"}
 rand = "0.7.2"
 prometheus-endpoint = { package = "substrate-prometheus-endpoint", version = "0.10.0-dev", path = "../../utils/prometheus" }
+ambassador = "0.3.2"
 
 sp-application-crypto = { version = "6.0.0", path = "../../primitives/application-crypto" }
 sp-api = { version = "4.0.0-dev", path = "../../primitives/api" }

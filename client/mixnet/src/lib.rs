@@ -27,12 +27,13 @@ use mixnet::{
 		hash_table::{Configuration as TopoConfigT, Parameters as TopoParams, TopologyHashTable},
 		Topology,
 	},
-	Error, MixPeerId, MixPublicKey,
+	Error, MixPeerId, MixPublicKey, SendOptions, PeerStats,
 };
 
-pub use mixnet::{Config, SinkToWorker, StreamFromWorker};
+pub use mixnet::{Config, SinkToWorker, StreamFromWorker, ambassador_impl_Topology};
 use sp_application_crypto::key_types;
 use sp_keystore::SyncCryptoStore;
+use ambassador::Delegate;
 
 use codec::Encode;
 use futures::{future, FutureExt, StreamExt};
@@ -559,6 +560,8 @@ where
 ///
 /// When sending a message, the message can only reach nodes
 /// that are part of the topology.
+#[derive(Delegate)]
+#[delegate(Topology, target = "topo")]
 pub struct AuthorityTopology {
 	network_id: NetworkPeerId,
 	key_store: Arc<dyn SyncCryptoStore>,
@@ -598,28 +601,40 @@ impl AuthorityTopology {
 		AuthorityTopology { network_id, sessions: HashMap::new(), topo, key_store, metrics }
 	}
 
-	fn copy_connected_info_to_metrics(&self) {
+	fn copy_connected_info_to_metrics(&self, stats: &mixnet::PeerStats) {
 		self.metrics.as_ref().map(|m| {
 			m.current_connected
 				.with_label_values(&[
 					metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::Total as usize]
 				])
-				.set(self.topo.connected_nodes.len() as u64);
+				.set(stats.nb_connected as u64);
 			m.current_connected
 				.with_label_values(&[
 					metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::Forwarding as usize]
 				])
-				.set(self.topo.nb_connected_forward_routing as u64);
+				.set(stats.nb_connected_forward_routing as u64);
 			m.current_connected
 				.with_label_values(&[
 					metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::Receiving as usize]
 				])
-				.set(self.topo.nb_connected_receive_routing as u64);
+				.set(stats.nb_connected_receive_routing as u64);
 			m.current_connected
 				.with_label_values(&[
 					metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::External as usize]
 				])
-				.set(self.topo.nb_connected_external as u64);
+				.set(stats.nb_connected_external as u64);
+			m.current_connected
+				.with_label_values(&[
+					metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::Consumer as usize]
+				])
+				.set(stats.nb_connected_consumer as u64);
+			m.current_connected
+				.with_label_values(&[
+					metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::Handshakes as usize]
+				])
+				.set(stats.nb_pending_handshake as u64);
+
+
 		});
 	}
 }
@@ -629,7 +644,7 @@ impl mixnet::traits::Configuration for AuthorityTopology {
 		self.metrics.is_some()
 	}
 
-	fn window_stats(&self, stats: &mixnet::WindowStats) {
+	fn window_stats(&self, stats: &mixnet::WindowStats, peer_stats: &mixnet::PeerStats) {
 		if let Some(metrics) = self.metrics.as_ref() {
 			let nb_window = stats.window - stats.last_window;
 			if nb_window == 0 {
@@ -644,9 +659,9 @@ impl mixnet::traits::Configuration for AuthorityTopology {
 				metrics.max_packet_queue_for_peer.set(max_paquets);
 			}
 			let total_peer_paquets = stats.sum_connected.peer_paquet_queue_size;
-			if self.topo.nb_connected_forward_routing > 0 {
+			if peer_stats.nb_connected_forward_routing > 0 {
 				let peer_paquets =
-					total_peer_paquets as f64 / self.topo.nb_connected_forward_routing as f64;
+					total_peer_paquets as f64 / peer_stats.nb_connected_forward_routing as f64;
 				let peer_paquets = peer_paquets / nb_window as f64;
 				metrics.avg_packet_queue_size_for_peer.set(peer_paquets);
 				for _ in 0..nb_window {
@@ -740,6 +755,11 @@ impl mixnet::traits::Configuration for AuthorityTopology {
 				PacketsResult::Failure,
 			);
 		}
+		self.copy_connected_info_to_metrics(peer_stats);
+	}
+
+	fn peer_stats(&self, peer_stats: &mixnet::PeerStats) {
+		self.copy_connected_info_to_metrics(peer_stats);
 	}
 }
 
@@ -752,6 +772,7 @@ impl mixnet::traits::Handshake for AuthorityTopology {
 		&mut self,
 		payload: &[u8],
 		_from: &NetworkPeerId,
+		peers: &PeerStats,
 	) -> Option<(MixPeerId, MixPublicKey)> {
 		let mut peer_id = [0u8; 32];
 		peer_id.copy_from_slice(&payload[0..32]);
@@ -766,7 +787,7 @@ impl mixnet::traits::Handshake for AuthorityTopology {
 		debug!(target: "mixnet", "check handshake: {:?}, {:?}, {:?} from {:?}", peer_id, message, signature, _from);
 		use sp_application_crypto::RuntimePublic;
 		if key.verify(&message, &signature) {
-			if !self.accept_peer(&peer_id) {
+			if !self.accept_peer(&peer_id, peers) {
 				self.metrics.as_ref().map(|m| m.invalid_handshake.inc());
 				return None
 			}
@@ -814,73 +835,6 @@ impl mixnet::traits::Handshake for AuthorityTopology {
 	}
 }
 
-impl Topology for AuthorityTopology {
-	fn first_hop_nodes_external(
-		&self,
-		from: &MixPeerId,
-		to: &MixPeerId,
-	) -> Vec<(MixPeerId, MixPublicKey)> {
-		self.topo.first_hop_nodes_external(from, to)
-	}
-
-	fn is_first_node(&self, id: &MixPeerId) -> bool {
-		self.topo.is_first_node(id)
-	}
-
-	fn random_recipient(
-		&mut self,
-		from: &MixPeerId,
-		send_options: &mixnet::SendOptions,
-	) -> Option<(MixPeerId, MixPublicKey)> {
-		self.topo.random_recipient(from, send_options)
-	}
-
-	fn routing_to(&self, from: &MixPeerId, to: &MixPeerId) -> bool {
-		self.topo.routing_to(from, to)
-	}
-
-	fn random_path(
-		&mut self,
-		start_node: (&MixPeerId, Option<&MixPublicKey>),
-		recipient_node: (&MixPeerId, Option<&MixPublicKey>),
-		nb_chunk: usize,
-		num_hops: usize,
-		max_hops: usize,
-		last_query_if_surb: Option<&Vec<(MixPeerId, MixPublicKey)>>,
-	) -> Result<Vec<Vec<(MixPeerId, MixPublicKey)>>, Error> {
-		self.topo.random_path(
-			start_node,
-			recipient_node,
-			nb_chunk,
-			num_hops,
-			max_hops,
-			last_query_if_surb,
-		)
-	}
-
-	fn can_route(&self, id: &MixPeerId) -> bool {
-		self.topo.can_route(id)
-	}
-
-	fn connected(&mut self, peer_id: MixPeerId, key: MixPublicKey) {
-		self.topo.connected(peer_id, key);
-		self.copy_connected_info_to_metrics();
-	}
-
-	fn disconnected(&mut self, peer_id: &MixPeerId) {
-		self.topo.disconnected(peer_id);
-		self.copy_connected_info_to_metrics();
-	}
-
-	fn bandwidth_external(&self, peer_id: &MixPeerId) -> Option<(usize, usize)> {
-		self.topo.bandwidth_external(peer_id)
-	}
-
-	fn accept_peer(&self, peer_id: &MixPeerId) -> bool {
-		self.topo.accept_peer(peer_id)
-	}
-}
-
 mod metrics {
 	use log::trace;
 	use mixnet::MixPeerId;
@@ -918,9 +872,11 @@ mod metrics {
 		Forwarding = 1,
 		Receiving = 2,
 		External = 3,
+		Consumer = 4,
+		Handshakes = 5,
 	}
 
-	pub const LABEL_NODE_STATUS: &[&str] = &["total", "forwarding", "receiving", "external"];
+	pub const LABEL_NODE_STATUS: &[&str] = &["total", "forwarding", "receiving", "external", "consumer", "pending_handshakes"];
 
 	#[derive(Clone, Copy)]
 	pub enum PacketsKind {

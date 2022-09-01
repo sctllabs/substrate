@@ -8513,6 +8513,7 @@ dependencies = [
 name = "sc-mixnet"
 version = "0.1.0-dev"
 dependencies = [
+ "ambassador",
  "futures",
  "futures-timer",
  "libp2p",
