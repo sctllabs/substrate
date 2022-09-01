@@ -601,7 +601,7 @@ impl AuthorityTopology {
 		AuthorityTopology { network_id, sessions: HashMap::new(), topo, key_store, metrics }
 	}
 
-	fn copy_connected_info_to_metrics(&self, stats: &mixnet::PeerStats) {
+	fn copy_connected_info_to_metrics(&self, stats: &PeerStats) {
 		self.metrics.as_ref().map(|m| {
 			m.current_connected
 				.with_label_values(&[
@@ -642,7 +642,7 @@ impl mixnet::traits::Configuration for AuthorityTopology {
 		self.metrics.is_some()
 	}
 
-	fn window_stats(&self, stats: &mixnet::WindowStats, peer_stats: &mixnet::PeerStats) {
+	fn window_stats(&self, stats: &mixnet::WindowStats, peer_stats: &PeerStats) {
 		if let Some(metrics) = self.metrics.as_ref() {
 			let nb_window = stats.window - stats.last_window;
 			if nb_window == 0 {
@@ -756,7 +756,7 @@ impl mixnet::traits::Configuration for AuthorityTopology {
 		self.copy_connected_info_to_metrics(peer_stats);
 	}
 
-	fn peer_stats(&self, peer_stats: &mixnet::PeerStats) {
+	fn peer_stats(&self, peer_stats: &PeerStats) {
 		self.copy_connected_info_to_metrics(peer_stats);
 	}
 }
@@ -859,9 +859,6 @@ mod metrics {
 		// otherwhise it is a uptime.
 		pub number_of_window: Counter<U64>,
 		pub number_of_skipped_window: Counter<U64>,
-		// This may make little sense, just
-		// keeping an eye on it, should remove later.
-		pub rejected_external: Counter<U64>,
 		registry: Registry,
 	}
 
@@ -923,13 +920,6 @@ mod metrics {
 			&registry,
 		)?;
 		mixnet_info.set(1);
-		let rejected_external = register(
-			Counter::<U64>::new(
-				"substrate_mixnet_rejected_external",
-				"Number of external connection refused",
-			)?,
-			&registry,
-		)?;
 		let number_of_window = register(
 			Counter::<U64>::new("substrate_mixnet_windows", "Number of windows observed")?,
 			&registry,
@@ -1011,7 +1001,6 @@ mod metrics {
 		Ok(MetricsHandle {
 			mixnet_info,
 			current_connected,
-			rejected_external,
 			valid_handshake,
 			max_packet_queue_for_peer,
 			avg_packet_queue_size_for_peer,
