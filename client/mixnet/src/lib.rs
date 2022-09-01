@@ -766,7 +766,7 @@ impl mixnet::traits::Handshake for AuthorityTopology {
 		debug!(target: "mixnet", "check handshake: {:?}, {:?}, {:?} from {:?}", peer_id, message, signature, _from);
 		use sp_application_crypto::RuntimePublic;
 		if key.verify(&message, &signature) {
-			if !self.accept_peer(self.topo.local_id(), &peer_id) {
+			if !self.accept_peer(&peer_id) {
 				self.metrics.as_ref().map(|m| m.invalid_handshake.inc());
 				return None
 			}
@@ -876,8 +876,8 @@ impl Topology for AuthorityTopology {
 		self.topo.bandwidth_external(peer_id)
 	}
 
-	fn accept_peer(&self, local_id: &MixPeerId, peer_id: &MixPeerId) -> bool {
-		self.topo.accept_peer(local_id, peer_id)
+	fn accept_peer(&self, peer_id: &MixPeerId) -> bool {
+		self.topo.accept_peer(peer_id)
 	}
 }
 
