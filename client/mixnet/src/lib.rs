@@ -835,10 +835,6 @@ impl Topology for AuthorityTopology {
 		self.topo.random_recipient(from, send_options)
 	}
 
-	fn neighbors(&self, from: &MixPeerId) -> Option<Vec<(MixPeerId, MixPublicKey)>> {
-		self.topo.neighbors(from)
-	}
-
 	fn routing_to(&self, from: &MixPeerId, to: &MixPeerId) -> bool {
 		self.topo.routing_to(from, to)
 	}

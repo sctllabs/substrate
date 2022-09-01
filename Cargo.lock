@@ -94,6 +94,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ambassador"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6261a24dd580788c24183adf0e294f4dddc683325700b1932a085040bbf281c0"
+dependencies = [
+ "itertools",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "ansi_term"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -787,6 +799,12 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "bytemuck"
+version = "1.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f5715e491b5a1598fc2bef5a606847b5dc1d48ea625bd3c02c00de8285591da"
 
 [[package]]
 name = "byteorder"
@@ -4514,8 +4532,9 @@ name = "mixnet"
 version = "0.1.0"
 dependencies = [
  "aes 0.8.1",
- "arrayref",
+ "ambassador",
  "blake2-rfc",
+ "bytemuck",
  "ctr 0.9.1",
  "curve25519-dalek 3.2.0",
  "dyn-clone",
