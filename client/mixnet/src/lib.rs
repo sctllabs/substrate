@@ -27,7 +27,7 @@ use mixnet::{
 		hash_table::{Configuration as TopoConfigT, Parameters as TopoParams, TopologyHashTable},
 		Topology,
 	},
-	Error, MixPeerId, MixPublicKey, PeerStats, SendOptions,
+	Error, MixPeerId, MixPublicKey, PeerCount, SendOptions,
 };
 
 use ambassador::Delegate;
@@ -601,7 +601,7 @@ impl AuthorityTopology {
 		AuthorityTopology { network_id, sessions: HashMap::new(), topo, key_store, metrics }
 	}
 
-	fn copy_connected_info_to_metrics(&self, stats: &PeerStats) {
+	fn copy_connected_info_to_metrics(&self, stats: &PeerCount) {
 		self.metrics.as_ref().map(|m| {
 			m.current_connected
 				.with_label_values(&[
@@ -642,7 +642,7 @@ impl mixnet::traits::Configuration for AuthorityTopology {
 		self.metrics.is_some()
 	}
 
-	fn window_stats(&self, stats: &mixnet::WindowStats, peer_stats: &PeerStats) {
+	fn window_stats(&self, stats: &mixnet::WindowStats, peer_stats: &PeerCount) {
 		if let Some(metrics) = self.metrics.as_ref() {
 			let nb_window = stats.window - stats.last_window;
 			if nb_window == 0 {
@@ -756,7 +756,7 @@ impl mixnet::traits::Configuration for AuthorityTopology {
 		self.copy_connected_info_to_metrics(peer_stats);
 	}
 
-	fn peer_stats(&self, peer_stats: &PeerStats) {
+	fn peer_stats(&self, peer_stats: &PeerCount) {
 		self.copy_connected_info_to_metrics(peer_stats);
 	}
 }
@@ -770,7 +770,7 @@ impl mixnet::traits::Handshake for AuthorityTopology {
 		&mut self,
 		payload: &[u8],
 		_from: &NetworkPeerId,
-		peers: &PeerStats,
+		peers: &PeerCount,
 	) -> Option<(MixPeerId, MixPublicKey)> {
 		let mut peer_id = [0u8; 32];
 		peer_id.copy_from_slice(&payload[0..32]);
