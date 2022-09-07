@@ -668,6 +668,12 @@ impl mixnet::traits::Configuration for AuthorityTopology {
 			} else {
 				metrics.avg_packet_queue_size_for_peer.set(0.0);
 			}
+			let max_paquets = stats.sum_connected.max_peer_paquet_inject_queue_size as u64;
+			if metrics.max_packet_inject_queue_for_peer.get() < max_paquets {
+				metrics.max_packet_inject_queue_for_peer.set(max_paquets);
+			}
+			metrics.packet_inject_queue_size_for_peer.set(stats.sum_connected.peer_paquet_inject_queue_size as u64);
+
 			metrics.set_window_packets(
 				stats.number_received_valid,
 				nb_window,
@@ -852,6 +858,8 @@ mod metrics {
 		pub valid_handshake: Counter<U64>,
 		pub max_packet_queue_for_peer: Gauge<U64>,
 		pub avg_packet_queue_size_for_peer: Gauge<F64>,
+		pub max_packet_inject_queue_for_peer: Gauge<U64>,
+		pub packet_inject_queue_size_for_peer: Gauge<U64>,
 		// a bit redundant with gauge, should remove later.
 		pub avg_packet_queue_size_for_peer_histo: Histogram,
 		pub invalid_handshake: Counter<U64>,
@@ -997,6 +1005,20 @@ mod metrics {
 			)?,
 			&registry,
 		)?;
+		let max_packet_inject_queue_for_peer = register(
+			Gauge::new(
+				"substrate_mixnet_max_paquet_inject_queue_for_peer",
+				"Bigger queue of injected packet observed for a connection",
+			)?,
+			&registry,
+		)?;
+		let packet_inject_queue_size_for_peer = register(
+			Gauge::new(
+				"substrate_mixnet_paquet_inject_queue_for_peer",
+				"Injected packet queue size observed for all connections.",
+			)?,
+			&registry,
+		)?;
 
 		Ok(MetricsHandle {
 			mixnet_info,
@@ -1005,6 +1027,8 @@ mod metrics {
 			max_packet_queue_for_peer,
 			avg_packet_queue_size_for_peer,
 			avg_packet_queue_size_for_peer_histo,
+			max_packet_inject_queue_for_peer,
+			packet_inject_queue_size_for_peer,
 			invalid_handshake,
 			last_window_packets,
 			last_window_packets_histo,
