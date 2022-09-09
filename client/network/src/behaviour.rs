@@ -700,7 +700,14 @@ where
 			},
 			MixnetEvent::Connected(_peer_id, _pub_key) => {},
 			MixnetEvent::Disconnected(_peer_id, _mix_peer_id) => {},
-			MixnetEvent::TryConnect(_mixpeer_id, _network_id) => {},
+			MixnetEvent::TryConnect(_mixpeer_id, _network_id) => {
+				// TODO this is needed: probably send to service as done
+				// for message, and do from there or may also need to
+				// hit mixnet worker in order to resolve network_id
+				// from auth discovery (service may be more appropriate).
+				// see NetworkBehaviour::addresses_of_peer(swarm.behaviour_mut(), peer_id)
+	
+			},
 			MixnetEvent::CloseStream => {
 				log::error!(target: "mixnet", "Stream close, no message incomming.");
 			},
