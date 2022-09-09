@@ -699,7 +699,8 @@ where
 				}
 			},
 			MixnetEvent::Connected(_peer_id, _pub_key) => {},
-			MixnetEvent::Disconnected(_peer_id) => {},
+			MixnetEvent::Disconnected(_peer_id, _mix_peer_id) => {},
+			MixnetEvent::TryConnect(_mixpeer_id, _network_id) => {},
 			MixnetEvent::CloseStream => {
 				log::error!(target: "mixnet", "Stream close, no message incomming.");
 			},

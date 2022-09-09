@@ -50,7 +50,7 @@ pub use sp_finality_grandpa::{AuthorityId, AuthorityList, SetId};
 use sp_runtime::traits::{Block as BlockT, Header, NumberFor};
 use sp_session::CurrentSessionKeys;
 use std::{
-	collections::{HashMap, HashSet},
+	collections::{BTreeMap, BTreeSet, HashMap, HashSet},
 	sync::Arc,
 	time::Duration,
 };
@@ -672,7 +672,9 @@ impl mixnet::traits::Configuration for AuthorityTopology {
 			if metrics.max_packet_inject_queue_for_peer.get() < max_paquets {
 				metrics.max_packet_inject_queue_for_peer.set(max_paquets);
 			}
-			metrics.packet_inject_queue_size_for_peer.set(stats.sum_connected.peer_paquet_inject_queue_size as u64);
+			metrics
+				.packet_inject_queue_size_for_peer
+				.set(stats.sum_connected.peer_paquet_inject_queue_size as u64);
 
 			metrics.set_window_packets(
 				stats.number_received_valid,
@@ -776,7 +778,6 @@ impl mixnet::traits::Handshake for AuthorityTopology {
 		&mut self,
 		payload: &[u8],
 		_from: &NetworkPeerId,
-		peers: &PeerCount,
 	) -> Option<(MixPeerId, MixPublicKey)> {
 		let mut peer_id = [0u8; 32];
 		peer_id.copy_from_slice(&payload[0..32]);
@@ -791,19 +792,6 @@ impl mixnet::traits::Handshake for AuthorityTopology {
 		debug!(target: "mixnet", "check handshake: {:?}, {:?}, {:?} from {:?}", peer_id, message, signature, _from);
 		use sp_application_crypto::RuntimePublic;
 		if key.verify(&message, &signature) {
-			if !self.accept_peer(&peer_id, peers) {
-				self.metrics.as_ref().map(|m| m.invalid_handshake.inc());
-				return None
-			}
-			if self.can_route(&peer_id) {
-				// TODO this should be checking routing table from other peer and see peers
-				// connected to multiple others so we wait for their connection or ping them.
-				// TODO One could still for big difference in the priority list try to check if
-				// online and at some point reject the peer as not being connected enough (globaly
-				// with other authorities). Number can be big initially as authority may disable
-				// mixnet a lot. TODO in case we are already receiving from more than a threshould
-				// we drop others connection.
-			}
 			let pk = MixPublicKey::from(pk);
 			self.metrics.as_ref().map(|m| m.valid_handshake.inc());
 			Some((peer_id, pk))

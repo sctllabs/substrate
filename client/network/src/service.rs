@@ -389,7 +389,11 @@ where
 
 				let mut mixnet = None;
 				if let Some((mixnet_in, mixnet_out, command_sender)) = params.mixnet {
-					mixnet = Some((MixnetBehaviour::new(mixnet_in, mixnet_out), command_sender));
+					let keep_connection_alive = true;
+					mixnet = Some((
+						MixnetBehaviour::new(mixnet_in, mixnet_out, keep_connection_alive),
+						command_sender,
+					));
 				};
 
 				let result = Behaviour::new(
