@@ -622,9 +622,9 @@ dependencies = [
 
 [[package]]
 name = "blake2"
-version = "0.10.2"
+version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b94ba84325db59637ffc528bbe8c7f86c02c57cff5c0e2b9b00f9a851f42f309"
+checksum = "b9cf849ee05b2ee5fba5e36f97ff8ec2533916700fc0758d40d92136a42f3388"
 dependencies = [
  "digest 0.10.3",
 ]
@@ -4533,7 +4533,7 @@ version = "0.1.0"
 dependencies = [
  "aes 0.8.1",
  "ambassador",
- "blake2-rfc",
+ "blake2 0.10.4",
  "bytemuck",
  "ctr 0.9.1",
  "curve25519-dalek 3.2.0",
@@ -9533,7 +9533,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "774d05a3edae07ce6d68ea6984f3c05e9bba8927e3dd591e3b479e5b03213d0d"
 dependencies = [
  "aes-gcm",
- "blake2 0.10.2",
+ "blake2 0.10.4",
  "chacha20poly1305",
  "curve25519-dalek 4.0.0-pre.1",
  "rand_core 0.6.2",
@@ -9590,7 +9590,7 @@ dependencies = [
 name = "sp-api-proc-macro"
 version = "4.0.0-dev"
 dependencies = [
- "blake2 0.10.2",
+ "blake2 0.10.4",
  "proc-macro-crate",
  "proc-macro2",
  "quote",
@@ -9869,7 +9869,7 @@ dependencies = [
 name = "sp-core-hashing"
 version = "4.0.0"
 dependencies = [
- "blake2 0.10.2",
+ "blake2 0.10.4",
  "byteorder",
  "digest 0.10.3",
  "sha2 0.10.2",

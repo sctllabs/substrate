@@ -25,9 +25,9 @@
 use mixnet::{
 	traits::{
 		hash_table::{Configuration as TopoConfigT, Parameters as TopoParams, TopologyHashTable},
-		Topology,
+		NewRoutingSet, ShouldConnectTo, Topology,
 	},
-	Error, MixPeerId, MixPublicKey, PeerCount, SendOptions,
+	Error, MixPublicKey, MixnetId, PeerCount, SendOptions,
 };
 
 use ambassador::Delegate;
@@ -42,7 +42,7 @@ use log::{debug, error, trace, warn};
 use metrics::{PacketsKind, PacketsResult};
 use prometheus_endpoint::Registry as PrometheusRegistry;
 use sc_client_api::{BlockchainEvents, FinalityNotification, UsageProvider};
-use sc_network::{MixnetCommand, PeerId as NetworkPeerId};
+use sc_network::{MixnetCommand, PeerId as NetworkId};
 use sc_utils::mpsc::tracing_unbounded;
 use sp_api::ProvideRuntimeApi;
 use sp_core::crypto::CryptoTypePublicPair;
@@ -201,7 +201,7 @@ where
 
 		let topology = AuthorityTopology::new(
 			mixnet_config.local_id,
-			NetworkPeerId::from_public_key(&network_identity.public()),
+			NetworkId::from_public_key(&network_identity.public()),
 			mixnet_config.public_key,
 			key_store.clone(),
 			&mixnet_config,
@@ -371,8 +371,8 @@ where
 
 		self.fetch_new_session_keys(at, session);
 		self.update_own_public_key_within_authority_set(&set);
-		let current_local_id = *self.worker.local_id();
-		let current_public_key = *self.worker.public_key();
+		let current_local_id = *self.worker.mixnet().local_id();
+		let current_public_key = *self.worker.mixnet().public_key();
 		let topology = &mut self.worker.mixnet_mut().topology;
 		debug!(target: "mixnet", "Change authorities {:?}", set);
 
@@ -432,16 +432,15 @@ where
 			}
 		}
 
-		let new_self = restart
-			.as_ref()
-			.map(|(new_id, new_key)| (*new_id, new_key.as_ref().map(|pair| pair.0)));
-		topology.topo.handle_new_routing_set(&routing_set[..], new_self);
-
 		if let Some((id, key)) = restart {
 			debug!(target: "mixnet", "Restarting");
 			self.worker.restart(id, key);
+			unimplemented!(
+				"TODO update id and keys in topo too: just add routing set to restart params"
+			);
 		}
 
+		self.worker.mixnet_mut().new_global_routing_set(&routing_set[..]);
 		self.update_state(false);
 	}
 
@@ -563,7 +562,7 @@ where
 #[derive(Delegate)]
 #[delegate(Topology, target = "topo")]
 pub struct AuthorityTopology {
-	network_id: NetworkPeerId,
+	network_id: NetworkId,
 	key_store: Arc<dyn SyncCryptoStore>,
 
 	topo: TopologyHashTable<TopoConfig>,
@@ -582,15 +581,15 @@ pub struct AuthorityInfo {
 impl AuthorityTopology {
 	/// Instantiate a new topology.
 	pub fn new(
-		local_id: MixPeerId,
-		network_id: NetworkPeerId,
+		local_id: MixnetId,
+		network_id: NetworkId,
 		node_public_key: MixPublicKey,
 		key_store: Arc<dyn SyncCryptoStore>,
 		config: &Config,
 		metrics: Option<metrics::MetricsHandle>,
 	) -> Self {
 		let topo = TopologyHashTable::new(
-			// MixPeerId is ImOnline key.
+			// MixnetId is ImOnline key.
 			local_id,
 			node_public_key,
 			config,
@@ -775,10 +774,10 @@ impl mixnet::traits::Handshake for AuthorityTopology {
 	}
 
 	fn check_handshake(
-		&mut self,
+		&self,
 		payload: &[u8],
-		_from: &NetworkPeerId,
-	) -> Option<(MixPeerId, MixPublicKey)> {
+		_from: &NetworkId,
+	) -> Option<(MixnetId, MixPublicKey)> {
 		let mut peer_id = [0u8; 32];
 		peer_id.copy_from_slice(&payload[0..32]);
 		let mut pk = [0u8; 32];
@@ -801,7 +800,7 @@ impl mixnet::traits::Handshake for AuthorityTopology {
 		}
 	}
 
-	fn handshake(&mut self, with: &NetworkPeerId, public_key: &MixPublicKey) -> Option<Vec<u8>> {
+	fn handshake(&self, with: &NetworkId, public_key: &MixPublicKey) -> Option<Vec<u8>> {
 		let mut result = self.topo.local_id().to_vec();
 		result.extend_from_slice(&public_key.as_bytes()[..]);
 		let mut message = with.to_bytes().to_vec();
@@ -829,7 +828,7 @@ impl mixnet::traits::Handshake for AuthorityTopology {
 
 mod metrics {
 	use log::trace;
-	use mixnet::MixPeerId;
+	use mixnet::MixnetId;
 	use prometheus_endpoint::{
 		exponential_buckets, register, Counter, Gauge, GaugeVec, Histogram, HistogramOpts,
 		HistogramVec, Opts, PrometheusError, Registry, F64, U64,
@@ -902,7 +901,7 @@ mod metrics {
 	/// Register all metrics to endpoint and return handle.
 	pub fn register_metrics(
 		registry: Registry,
-		peer_id: &MixPeerId,
+		peer_id: &MixnetId,
 	) -> Result<MetricsHandle, PrometheusError> {
 		trace!(target: "mixnet", "Registering metrics");
 		let mixnet_info = register(
@@ -1029,7 +1028,7 @@ mod metrics {
 	impl MetricsHandle {
 		/// Change metrics containing id, this is slown and a misuse of metrics, but does not happen
 		/// often.
-		pub fn change_id(&mut self, new_peer_id: &MixPeerId) -> Result<(), PrometheusError> {
+		pub fn change_id(&mut self, new_peer_id: &MixnetId) -> Result<(), PrometheusError> {
 			self.registry.unregister(Box::new(self.mixnet_info.clone()))?;
 			self.mixnet_info = register(
 				Gauge::<U64>::with_opts(
