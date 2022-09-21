@@ -1769,6 +1769,18 @@ where
 					info!(target: "mixnet", "Inject transaction from mixnet from {:?}) tx: {:?}", sender, message);
 					this.tx_handler_controller.inject_transaction_mixnet(kind, message, reply);
 				},
+				Poll::Ready(SwarmEvent::Behaviour(BehaviourOut::MixnetTryReco(
+					mixnet_id,
+					net_id,
+				))) =>
+					if let Some(net_id) = net_id {
+						let e = this.network_service.dial(net_id);
+						if let Err(DialError::NoAddresses) = e {
+							unimplemented!("TODO fetch address from authority discovery");
+						}
+					} else {
+						unimplemented!("TODO feth address from authority discovery");
+					},
 				Poll::Ready(SwarmEvent::ConnectionEstablished {
 					peer_id,
 					endpoint,

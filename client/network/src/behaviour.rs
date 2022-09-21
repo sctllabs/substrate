@@ -238,6 +238,9 @@ pub enum BehaviourOut<B: BlockT> {
 		mixnet::MessageType,
 		Option<futures::channel::mpsc::Sender<MixnetCommand>>,
 	),
+
+	/// Mixnet ask for connection or reconnection attempt.
+	MixnetTryReco(MixnetId, Option<PeerId>),
 }
 
 impl<B, Client> Behaviour<B, Client>
@@ -740,10 +743,6 @@ where
 	}
 
 	fn try_reco(&mut self, mixnet_id: MixnetId, network_id: Option<PeerId>) {
-		// TODO this is needed: probably send to service as done
-		// for message, and do from there or may also need to
-		// hit mixnet worker in order to resolve network_id
-		// from auth discovery (service may be more appropriate).
-		// see NetworkBehaviour::addresses_of_peer(swarm.behaviour_mut(), peer_id)
+		self.events.push_back(BehaviourOut::MixnetTryReco(mixnet_id, network_id));
 	}
 }
