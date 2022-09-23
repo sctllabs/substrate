@@ -68,6 +68,8 @@ pub enum MixnetCommand {
 	TransactionImportResult(Box<mixnet::SurbsPayload>, MixnetImportResult),
 	/// Result of transaction to send back in mixnet.
 	SendTransaction(Vec<u8>, mixnet::SendOptions, oneshot::Sender<Result<(), mixnet::Error>>),
+	/// Try reconnect when an address need to be resolved.
+	TryReco(MixnetId),
 }
 
 /// Result reported in surb for a transaction imported from a mixnet.
@@ -240,7 +242,7 @@ pub enum BehaviourOut<B: BlockT> {
 	),
 
 	/// Mixnet ask for connection or reconnection attempt.
-	MixnetTryReco(MixnetId, Option<PeerId>),
+	MixnetTryReco(MixnetId, Option<PeerId>, Option<futures::channel::mpsc::Sender<MixnetCommand>>),
 }
 
 impl<B, Client> Behaviour<B, Client>
@@ -705,11 +707,13 @@ where
 			MixnetEvent::Disconnected(network_id, mixnet_id, try_reco) =>
 				if try_reco {
 					if let Some(mixnet_id) = mixnet_id {
-						self.try_reco(mixnet_id, Some(network_id));
+						self.try_reco(mixnet_id, Some(network_id), self.mixnet_command_sender.clone()
+);
 					}
 				},
 			MixnetEvent::TryConnect(mixnet_id, network_id) => {
-				self.try_reco(mixnet_id, network_id);
+				self.try_reco(mixnet_id, network_id, self.mixnet_command_sender.clone()
+);
 			},
 			MixnetEvent::CloseStream => {
 				log::error!(target: "mixnet", "Stream close, no message incomming.");
@@ -742,7 +746,8 @@ where
 		Poll::Pending
 	}
 
-	fn try_reco(&mut self, mixnet_id: MixnetId, network_id: Option<PeerId>) {
-		self.events.push_back(BehaviourOut::MixnetTryReco(mixnet_id, network_id));
+	// TODO type alias for the sender!!!
+	fn try_reco(&mut self, mixnet_id: MixnetId, network_id: Option<PeerId>, forward: Option<futures::channel::mpsc::Sender<MixnetCommand>>) {
+		self.events.push_back(BehaviourOut::MixnetTryReco(mixnet_id, network_id, forward));
 	}
 }

@@ -36,11 +36,15 @@ use sp_application_crypto::key_types;
 use sp_keystore::SyncCryptoStore;
 
 use codec::Encode;
-use futures::{future, FutureExt, StreamExt};
+use futures::{
+	channel::{mpsc::SendError, oneshot},
+	future, FutureExt, StreamExt, future::OptionFuture,
+};
 use futures_timer::Delay;
 use log::{debug, error, trace, warn};
 use metrics::{PacketsKind, PacketsResult};
 use prometheus_endpoint::Registry as PrometheusRegistry;
+use sc_authority_discovery::NetworkProvider;
 use sc_client_api::{BlockchainEvents, FinalityNotification, UsageProvider};
 use sc_network::{MixnetCommand, PeerId as NetworkId};
 use sc_utils::mpsc::tracing_unbounded;
@@ -50,8 +54,9 @@ pub use sp_finality_grandpa::{AuthorityId, AuthorityList, SetId};
 use sp_runtime::traits::{Block as BlockT, Header, NumberFor};
 use sp_session::CurrentSessionKeys;
 use std::{
-	collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+	collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
 	sync::Arc,
+	pin::Pin,
 	time::Duration,
 };
 
@@ -89,7 +94,7 @@ impl TopoConfigT for TopoConfig {
 }
 
 /// Mixnet running worker.
-pub struct MixnetWorker<B: BlockT, C> {
+pub struct MixnetWorker<B: BlockT, C, N> {
 	// current node authority_id if validating.
 	authority_id: Option<AuthorityId>,
 	worker: mixnet::MixnetWorker<AuthorityTopology>,
@@ -104,11 +109,16 @@ pub struct MixnetWorker<B: BlockT, C> {
 	state: State,
 	// External command.
 	command_stream: futures::channel::mpsc::Receiver<MixnetCommand>,
+	authority_discovery_service: sc_authority_discovery::Service,
+	authority_replies: VecDeque<Option<AuthorityRx>>,
+	authority_queries: VecDeque<AuthorityInfo>,
 	key_store: Arc<dyn SyncCryptoStore>,
+	network: Arc<N>,
 }
 
 type WorkerChannels = (mixnet::WorkerChannels, futures::channel::mpsc::Receiver<MixnetCommand>);
 
+type AuthorityRx = oneshot::Receiver<Option<HashSet<sc_network::Multiaddr>>>;
 #[derive(PartialEq, Eq)]
 enum State {
 	Synching,
@@ -129,11 +139,12 @@ pub fn new_channels(
 	)
 }
 
-impl<B, C> MixnetWorker<B, C>
+impl<B, C, N> MixnetWorker<B, C, N>
 where
 	B: BlockT,
 	C: UsageProvider<B> + BlockchainEvents<B> + ProvideRuntimeApi<B>,
 	C::Api: CurrentSessionKeys<B>,
+	N: NetworkProvider,
 {
 	/// Instantiate worker. Should be call after imonline and
 	/// grandpa as it reads their keystore.
@@ -141,12 +152,14 @@ where
 		inner_channels: WorkerChannels,
 		network_identity: &libp2p::core::identity::Keypair,
 		client: Arc<C>,
+		network: Arc<N>,
 		shared_authority_set: sc_finality_grandpa::SharedAuthoritySet<
 			<B as BlockT>::Hash,
 			NumberFor<B>,
 		>,
 		key_store: Arc<dyn SyncCryptoStore>,
 		metrics: Option<PrometheusRegistry>,
+		authority_discovery_service: sc_authority_discovery::Service,
 	) -> Option<Self> {
 		let mut local_public_key = None;
 		// get the peer id, could be another one than the one define in session: in this
@@ -218,8 +231,12 @@ where
 			session: None,
 			client,
 			state,
+			authority_discovery_service,
 			command_stream: inner_channels.1,
 			key_store,
+			authority_queries: VecDeque::new(),
+			authority_replies: VecDeque::new(),
+			network,
 		})
 	}
 
@@ -268,38 +285,97 @@ where
 		let mut delay_finalized = Delay::new(Duration::from_secs(DELAY_NO_FINALISATION_S));
 		let delay_finalized = &mut delay_finalized;
 		loop {
+			let mut pop_auth_query = false;
+			let mut err_auth_query = false;
+			let auth_poll = self.authority_replies.get_mut(0).map(Option::as_mut).flatten();
+			let auth_poll = OptionFuture2(auth_poll);
+
 			futures::select! {
-				notif = self.finality_stream.next() => {
-					// TODO try accessing last of finality stream (possibly skipping some block)
-					if let Some(notif) = notif {
+				// TODO poll more than first??
+				auth_address = auth_poll.fuse() => {
+					debug!(target: "mixnet", "Received auth reply {:?}.", auth_address);
+					match auth_address {
+						Ok(Some(addresses)) => {
+						let auth_id = self.authority_queries.get(0).unwrap().clone();
+						for addr in addresses {
+							match sc_network::config::parse_addr(addr) {
+								Ok((address, _)) => {
+									// TODO MixnetCommand useless? -> send TryRecov back to network service but with
+									// address
+//									self.handle_command(MixnetCommand::AuthorityId(auth_id.grandpa_id.clone(), auth_id.authority_discovery_id.clone(), address));
+								},
+								Err(_) => continue,
+							};
+						}
+						pop_auth_query = true; // TODO same for Ok(None)?
+					},
+					Ok(None) => {
+						pop_auth_query = true; // TODO same for Ok(None)?
+					},
+					Err(e) => {
+						// TODO trace
+						err_auth_query = true;
+					},
+					}
+				},
+
+					notif = self.finality_stream.next() => {
+						// TODO try accessing last of finality stream (possibly skipping some block)
+						if let Some(notif) = notif {
+							delay_finalized.reset(Duration::from_secs(DELAY_NO_FINALISATION_S));
+							self.handle_new_finalize_block(notif);
+						} else {
+							// This point is reached if the other component did shutdown.
+							debug!(target: "mixnet", "Mixnet, shutdown.");
+							return;
+						}
+					},
+					command = self.command_stream.next() => {
+						if let Some(command) = command {
+							self.handle_command(command);
+						} else {
+							// This point is reached if the other component did shutdown.
+							// Shutdown as well.
+							debug!(target: "mixnet", "Mixnet, shutdown.");
+							return;
+						}
+					},
+					success = future::poll_fn(|cx| self.worker.poll(cx)).fuse() => {
+						if !success {
+							debug!(target: "mixnet", "Mixnet, shutdown.");
+							return;
+						}
+					},
+					_ = delay_finalized.fuse() => {
+						self.state = State::Synching;
 						delay_finalized.reset(Duration::from_secs(DELAY_NO_FINALISATION_S));
-						self.handle_new_finalize_block(notif);
-					} else {
-						// This point is reached if the other component did shutdown.
-						debug!(target: "mixnet", "Mixnet, shutdown.");
-						return;
+					},
+			}
+			if pop_auth_query {
+				self.authority_queries.pop_front();
+				self.authority_replies.pop_front();
+			} else if err_auth_query {
+				if let Some(a) = self.authority_queries.pop_front() {
+					self.authority_queries.push_back(a);
+				}
+				if let Some(_) = self.authority_replies.pop_front() {
+					self.authority_replies.push_back(None);
+				}
+			}
+
+			if self.authority_replies.get_mut(0).map(Option::as_mut).flatten().is_none() {
+				if let Some(info) = self.authority_queries.get_mut(0) {
+					if let Ok(auth_public) = info.authority_discovery_id.1.as_slice().try_into() {
+						if let Some(rx) = self
+							.authority_discovery_service
+							.get_addresses_by_authority_id_callback(auth_public)
+						{
+							self.authority_replies[0] = Some(rx);
+						} else {
+							debug!(target: "mixnet", "Query authority full channel.");
+						}
 					}
-				},
-				command = self.command_stream.next() => {
-					if let Some(command) = command {
-						self.handle_command(command);
-					} else {
-						// This point is reached if the other component did shutdown.
-						// Shutdown as well.
-						debug!(target: "mixnet", "Mixnet, shutdown.");
-						return;
-					}
-				},
-				success = future::poll_fn(|cx| self.worker.poll(cx)).fuse() => {
-					if !success {
-						debug!(target: "mixnet", "Mixnet, shutdown.");
-						return;
-					}
-				},
-				_ = delay_finalized.fuse() => {
-					self.state = State::Synching;
-					delay_finalized.reset(Duration::from_secs(DELAY_NO_FINALISATION_S));
-				},
+				}
 			}
 		}
 	}
@@ -359,6 +435,40 @@ where
 				} else {
 					let _ = reply.send(Err(mixnet::Error::NotReady));
 				},
+			MixnetCommand::TryReco(mix_id, _) => {
+				// TODO rev index
+				let topology = &mut self.worker.mixnet_mut().topology;
+				let mut found = None;
+				for (grandpa, im_online) in topology.sessions.iter() {
+					if im_online.1 == mix_id {
+						found = Some(grandpa);
+						break
+					}
+				}
+				if let Some(authority_id) = found {
+					if let Some(authority_discovery_id) = topology.sessions_disc.get(&authority_id)
+					{
+						if let Ok(auth_public) = authority_discovery_id.1.as_slice().try_into() {
+							if let Ok(grandpa_id) = authority_id.1.as_slice().try_into() {
+								self.authority_queries.push_back(AuthorityInfo {
+									grandpa_id,
+									authority_discovery_id: authority_discovery_id.clone(),
+								});
+
+								if let Some(rx) = self
+									.authority_discovery_service
+									.get_addresses_by_authority_id_callback(auth_public)
+								{
+									self.authority_replies.push_back(Some(rx));
+								} else {
+									debug!(target: "mixnet", "Query authority full channel.");
+									self.authority_replies.push_back(None);
+								}
+							}
+						}
+					}
+				}
+			},
 		}
 	}
 
@@ -492,18 +602,37 @@ where
 		};
 		debug!(target: "mixnet", "Fetched session keys {:?}, at {:?}", sessions, block_id);
 		self.worker.mixnet_mut().topology.sessions = sessions
-			.into_iter()
+			.iter()
 			.flat_map(|(_, keys)| {
 				let mut grandpa = None;
 				let mut imonline = None;
 				for pair in keys {
 					if pair.0 == sp_application_crypto::key_types::GRANDPA {
-						grandpa = Some(pair.1);
+						grandpa = Some(pair.1.clone());
 					} else if pair.0 == sp_application_crypto::key_types::IM_ONLINE {
-						imonline = Some(pair.1);
+						imonline = Some(pair.1.clone());
 					}
 				}
 				if let (Some(g), Some(a)) = (grandpa, imonline) {
+					Some((g, a))
+				} else {
+					None
+				}
+			})
+			.collect();
+		self.worker.mixnet_mut().topology.sessions_disc = sessions
+			.into_iter()
+			.flat_map(|(_, keys)| {
+				let mut grandpa = None;
+				let mut auth_disc = None;
+				for pair in keys {
+					if pair.0 == sp_application_crypto::key_types::GRANDPA {
+						grandpa = Some(pair.1);
+					} else if pair.0 == sp_application_crypto::key_types::AUTHORITY_DISCOVERY {
+						auth_disc = Some(pair.1);
+					}
+				}
+				if let (Some(g), Some(a)) = (grandpa, auth_disc) {
 					Some((g, a))
 				} else {
 					None
@@ -568,6 +697,8 @@ pub struct AuthorityTopology {
 	topo: TopologyHashTable<TopoConfig>,
 	// Current session mapping of Grandpa key to IMonline key.
 	sessions: HashMap<CryptoTypePublicPair, CryptoTypePublicPair>,
+	// Current session mapping of Grandpa key to Authoritydiscovery keys.
+	sessions_disc: HashMap<CryptoTypePublicPair, CryptoTypePublicPair>,
 
 	metrics: Option<metrics::MetricsHandle>,
 }
@@ -597,7 +728,14 @@ impl AuthorityTopology {
 			(),
 		);
 
-		AuthorityTopology { network_id, sessions: HashMap::new(), topo, key_store, metrics }
+		AuthorityTopology {
+			network_id,
+			sessions: HashMap::new(),
+			sessions_disc: HashMap::new(),
+			topo,
+			key_store,
+			metrics,
+		}
 	}
 
 	fn copy_connected_info_to_metrics(&self, stats: &PeerCount) {
@@ -1071,3 +1209,21 @@ mod metrics {
 		}
 	}
 }
+
+struct OptionFuture2<F>(Option<F>);
+// TODO find something doing it
+impl<F: futures::Future + Unpin> futures::Future for OptionFuture2<F> {
+	type Output = F::Output;
+
+	fn poll(
+		self: Pin<&mut Self>,
+		cx: &mut futures::task::Context<'_>,
+	) -> futures::task::Poll<Self::Output> {
+		match self.get_mut().0.as_mut() {
+			Some(x) => x.poll_unpin(cx),
+			// Do not try to wakeup cx: in a select and handled by a Delay.
+			None => futures::task::Poll::Pending,
+		}
+	}
+}
+

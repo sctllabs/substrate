@@ -1066,6 +1066,11 @@ where
 	fn sync_num_connected(&self) -> usize {
 		self.num_connected.load(Ordering::Relaxed)
 	}
+
+	/// Force reaching a given `MultiAddr`.
+	fn dial(&self, addr: Multiaddr) {
+		let _ = self.to_worker.unbounded_send(ServiceToWorkerMsg::Dial(addr));
+	}
 }
 
 impl<B, H> NetworkEventStream for NetworkService<B, H>
@@ -1323,6 +1328,7 @@ enum ServiceToWorkerMsg<B: BlockT, H: ExHashT> {
 	},
 	DisconnectPeer(PeerId, Cow<'static, str>),
 	NewBestBlockImported(B::Hash, NumberFor<B>),
+	Dial(Multiaddr),
 }
 
 /// Main network worker. Must be polled in order for the network to advance.
@@ -1520,6 +1526,12 @@ where
 					.behaviour_mut()
 					.user_protocol_mut()
 					.new_best_block_imported(hash, number),
+				ServiceToWorkerMsg::Dial(address) => {
+					if let Err(e) = this.network_service.dial(address.clone()) {
+						info!(target: "mixnet", "Could not dial address: {:?}", address);
+						info!(target: "sub-libp2p", "Could not dial address: {:?}", address);
+					}
+				},
 			}
 		}
 
@@ -1772,14 +1784,19 @@ where
 				Poll::Ready(SwarmEvent::Behaviour(BehaviourOut::MixnetTryReco(
 					mixnet_id,
 					net_id,
+					mut reply,
 				))) =>
 					if let Some(net_id) = net_id {
 						let e = this.network_service.dial(net_id);
 						if let Err(DialError::NoAddresses) = e {
-							unimplemented!("TODO fetch address from authority discovery");
+							if let Some(Err(e)) = reply.as_mut().map(|r| r.start_send(behaviour::MixnetCommand::TryReco(mixnet_id))) {
+								trace!(target: "mixnet", "Channel issue could not try reco {:?}", e);
+							}
 						}
 					} else {
-						unimplemented!("TODO feth address from authority discovery");
+						if let Some(Err(e)) = reply.as_mut().map(|r| r.start_send(behaviour::MixnetCommand::TryReco(mixnet_id))) {
+							trace!(target: "mixnet", "Channel issue could not try reco {:?}", e);
+						}
 					},
 				Poll::Ready(SwarmEvent::ConnectionEstablished {
 					peer_id,

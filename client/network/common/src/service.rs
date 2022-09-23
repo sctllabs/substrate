@@ -249,6 +249,9 @@ pub trait NetworkPeers {
 
 	/// Returns the number of peers in the sync peer set we're connected to.
 	fn sync_num_connected(&self) -> usize;
+
+	/// Force connect to some address.
+	fn dial(&self, addr: Multiaddr);
 }
 
 // Manual implementation to avoid extra boxing here
@@ -327,6 +330,10 @@ where
 
 	fn sync_num_connected(&self) -> usize {
 		T::sync_num_connected(self)
+	}
+
+	fn dial(&self, addr: Multiaddr) {
+		T::dial(self, addr)
 	}
 }
 
