@@ -119,7 +119,7 @@ pub struct MixnetWorker<B: BlockT, C, N> {
 	state: State,
 	// External command.
 	command_stream: futures::channel::mpsc::Receiver<MixnetCommand>,
-	authority_discovery_service: sc_authority_discovery::Service,
+	authority_discovery_service: Option<sc_authority_discovery::Service>,
 	authority_replies: VecDeque<Option<AuthorityRx>>,
 	authority_queries: VecDeque<AuthorityInfo>,
 	key_store: Arc<dyn SyncCryptoStore>,
@@ -169,7 +169,7 @@ where
 		>,
 		key_store: Arc<dyn SyncCryptoStore>,
 		metrics: Option<PrometheusRegistry>,
-		authority_discovery_service: sc_authority_discovery::Service,
+		authority_discovery_service: Option<sc_authority_discovery::Service>,
 	) -> Option<Self> {
 		let mut local_public_key = None;
 		// get the peer id, could be another one than the one define in session: in this
@@ -374,13 +374,16 @@ where
 			if self.authority_replies.get_mut(0).map(Option::as_mut).flatten().is_none() {
 				if let Some(info) = self.authority_queries.get_mut(0) {
 					if let Ok(auth_public) = info.authority_discovery_id.1.as_slice().try_into() {
-						if let Some(rx) = self
-							.authority_discovery_service
-							.get_addresses_by_authority_id_callback(auth_public)
-						{
-							self.authority_replies[0] = Some(rx);
+						if let Some(service) = self.authority_discovery_service.as_mut() {
+							if let Some(rx) =
+								service.get_addresses_by_authority_id_callback(auth_public)
+							{
+								self.authority_replies[0] = Some(rx);
+							} else {
+								debug!(target: "mixnet", "Query authority full channel.");
+							}
 						} else {
-							debug!(target: "mixnet", "Query authority full channel.");
+							debug!(target: "mixnet", "Non authority node not dialing.");
 						}
 					}
 				}
@@ -463,14 +466,17 @@ where
 									authority_discovery_id: authority_discovery_id.clone(),
 								});
 
-								if let Some(rx) = self
-									.authority_discovery_service
-									.get_addresses_by_authority_id_callback(auth_public)
-								{
-									self.authority_replies.push_back(Some(rx));
+								if let Some(service) = self.authority_discovery_service.as_mut() {
+									if let Some(rx) =
+										service.get_addresses_by_authority_id_callback(auth_public)
+									{
+										self.authority_replies.push_back(Some(rx));
+									} else {
+										debug!(target: "mixnet", "Query authority full channel.");
+										self.authority_replies.push_back(None);
+									}
 								} else {
-									debug!(target: "mixnet", "Query authority full channel.");
-									self.authority_replies.push_back(None);
+									debug!(target: "mixnet", "Non authority node not dialing.");
 								}
 							}
 						}

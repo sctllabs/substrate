@@ -493,7 +493,7 @@ pub fn new_full_base(
 	}
 
 	// Spawn authority discovery module.
-	if role.is_authority() {
+	let authority_discovery_service = if role.is_authority() {
 		let authority_discovery_role =
 			sc_authority_discovery::Role::PublishAndDiscover(keystore_container.keystore());
 		let dht_event_stream =
@@ -503,7 +503,7 @@ pub fn new_full_base(
 					_ => None,
 				}
 			});
-		let (authority_discovery_worker, _service) =
+		let (authority_discovery_worker, service) =
 			sc_authority_discovery::new_worker_and_service_with_config(
 				sc_authority_discovery::WorkerConfig {
 					publish_non_global_ips: auth_disc_publish_non_global_ips,
@@ -521,7 +521,10 @@ pub fn new_full_base(
 			Some("networking"),
 			authority_discovery_worker.run(),
 		);
-	}
+		Some(service)
+	} else {
+		None
+	};
 
 	// if the node isn't actively participating in consensus then it doesn't
 	// need a keystore, regardless of which protocol we use below.
@@ -571,9 +574,11 @@ pub fn new_full_base(
 			channels_to_network,
 			&local_id,
 			client.clone(),
+			network.clone(),
 			authority_set,
 			keystore_container.sync_keystore(),
 			metrics,
+			authority_discovery_service,
 		) {
 			task_manager
 				.spawn_handle()
