@@ -8525,6 +8525,7 @@ dependencies = [
  "sc-client-api",
  "sc-finality-grandpa",
  "sc-network",
+ "sc-network-common",
  "sc-utils",
  "sp-api",
  "sp-application-crypto",

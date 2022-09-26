@@ -707,13 +707,15 @@ where
 			MixnetEvent::Disconnected(network_id, mixnet_id, try_reco) =>
 				if try_reco {
 					if let Some(mixnet_id) = mixnet_id {
-						self.try_reco(mixnet_id, Some(network_id), self.mixnet_command_sender.clone()
-);
+						self.try_reco(
+							mixnet_id,
+							Some(network_id),
+							self.mixnet_command_sender.clone(),
+						);
 					}
 				},
 			MixnetEvent::TryConnect(mixnet_id, network_id) => {
-				self.try_reco(mixnet_id, network_id, self.mixnet_command_sender.clone()
-);
+				self.try_reco(mixnet_id, network_id, self.mixnet_command_sender.clone());
 			},
 			MixnetEvent::CloseStream => {
 				log::error!(target: "mixnet", "Stream close, no message incomming.");
@@ -747,7 +749,13 @@ where
 	}
 
 	// TODO type alias for the sender!!!
-	fn try_reco(&mut self, mixnet_id: MixnetId, network_id: Option<PeerId>, forward: Option<futures::channel::mpsc::Sender<MixnetCommand>>) {
-		self.events.push_back(BehaviourOut::MixnetTryReco(mixnet_id, network_id, forward));
+	fn try_reco(
+		&mut self,
+		mixnet_id: MixnetId,
+		network_id: Option<PeerId>,
+		forward: Option<futures::channel::mpsc::Sender<MixnetCommand>>,
+	) {
+		self.events
+			.push_back(BehaviourOut::MixnetTryReco(mixnet_id, network_id, forward));
 	}
 }

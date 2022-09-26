@@ -251,6 +251,10 @@ pub trait NetworkPeers {
 	fn sync_num_connected(&self) -> usize;
 
 	/// Force connect to some address.
+	/// TODO in another trait or it's own.
+	/// or a mixnet related one
+	/// TODO in another trait or it's own.
+	/// or a mixnet related one (+ transaction from mixnet handling)
 	fn dial(&self, addr: Multiaddr);
 }
 

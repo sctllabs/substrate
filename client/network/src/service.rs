@@ -1789,12 +1789,18 @@ where
 					if let Some(net_id) = net_id {
 						let e = this.network_service.dial(net_id);
 						if let Err(DialError::NoAddresses) = e {
-							if let Some(Err(e)) = reply.as_mut().map(|r| r.start_send(behaviour::MixnetCommand::TryReco(mixnet_id))) {
+							if let Some(Err(e)) = reply
+								.as_mut()
+								.map(|r| r.start_send(behaviour::MixnetCommand::TryReco(mixnet_id)))
+							{
 								trace!(target: "mixnet", "Channel issue could not try reco {:?}", e);
 							}
 						}
 					} else {
-						if let Some(Err(e)) = reply.as_mut().map(|r| r.start_send(behaviour::MixnetCommand::TryReco(mixnet_id))) {
+						if let Some(Err(e)) = reply
+							.as_mut()
+							.map(|r| r.start_send(behaviour::MixnetCommand::TryReco(mixnet_id)))
+						{
 							trace!(target: "mixnet", "Channel issue could not try reco {:?}", e);
 						}
 					},

@@ -38,15 +38,18 @@ use sp_keystore::SyncCryptoStore;
 use codec::Encode;
 use futures::{
 	channel::{mpsc::SendError, oneshot},
-	future, FutureExt, StreamExt, future::OptionFuture,
+	future,
+	future::OptionFuture,
+	FutureExt, StreamExt,
 };
 use futures_timer::Delay;
 use log::{debug, error, trace, warn};
 use metrics::{PacketsKind, PacketsResult};
 use prometheus_endpoint::Registry as PrometheusRegistry;
-use sc_authority_discovery::NetworkProvider;
 use sc_client_api::{BlockchainEvents, FinalityNotification, UsageProvider};
 use sc_network::{MixnetCommand, PeerId as NetworkId};
+use sc_network_common::service::NetworkPeers;
+
 use sc_utils::mpsc::tracing_unbounded;
 use sp_api::ProvideRuntimeApi;
 use sp_core::crypto::CryptoTypePublicPair;
@@ -55,8 +58,8 @@ use sp_runtime::traits::{Block as BlockT, Header, NumberFor};
 use sp_session::CurrentSessionKeys;
 use std::{
 	collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
-	sync::Arc,
 	pin::Pin,
+	sync::Arc,
 	time::Duration,
 };
 
@@ -72,6 +75,13 @@ const UNSYNCH_FINALIZED_MARGIN: u32 = 10;
 /// Delay in seconds after which if no finalization occurs,
 /// we switch back to synching state.
 const DELAY_NO_FINALISATION_S: u64 = 60;
+
+/// NetworkProvider provides [`Worker`] with all necessary hooks into the
+/// underlying Substrate networking. Using this trait abstraction instead of
+/// `sc_network::NetworkService` directly is necessary to unit test [`Worker`].
+pub trait NetworkProvider: NetworkPeers {}
+
+impl<T> NetworkProvider for T where T: NetworkPeers {}
 
 struct TopoConfig;
 
@@ -299,10 +309,8 @@ where
 						let auth_id = self.authority_queries.get(0).unwrap().clone();
 						for addr in addresses {
 							match sc_network::config::parse_addr(addr) {
-								Ok((address, _)) => {
-									// TODO MixnetCommand useless? -> send TryRecov back to network service but with
-									// address
-//									self.handle_command(MixnetCommand::AuthorityId(auth_id.grandpa_id.clone(), auth_id.authority_discovery_id.clone(), address));
+								Ok((_peer_id, address)) => {
+									self.network.dial(address);
 								},
 								Err(_) => continue,
 							};
@@ -435,7 +443,7 @@ where
 				} else {
 					let _ = reply.send(Err(mixnet::Error::NotReady));
 				},
-			MixnetCommand::TryReco(mix_id, _) => {
+			MixnetCommand::TryReco(mix_id) => {
 				// TODO rev index
 				let topology = &mut self.worker.mixnet_mut().topology;
 				let mut found = None;
@@ -1226,4 +1234,3 @@ impl<F: futures::Future + Unpin> futures::Future for OptionFuture2<F> {
 		}
 	}
 }
-
