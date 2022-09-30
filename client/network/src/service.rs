@@ -49,8 +49,8 @@ use libp2p::{
 	multiaddr,
 	ping::Failure as PingFailure,
 	swarm::{
-		AddressScore, ConnectionError, ConnectionLimits, DialError, NetworkBehaviour,
-		PendingConnectionError, Swarm, SwarmBuilder, SwarmEvent,
+		dial_opts::DialOpts, AddressScore, ConnectionError, ConnectionLimits, DialError,
+		NetworkBehaviour, PendingConnectionError, Swarm, SwarmBuilder, SwarmEvent,
 	},
 	Multiaddr, PeerId,
 };
@@ -1029,7 +1029,7 @@ where
 	}
 
 	/// Force reaching a given `MultiAddr`.
-	fn dial(&self, addr: Multiaddr) {
+	fn dial(&self, addr: DialOpts) {
 		let _ = self.to_worker.unbounded_send(ServiceToWorkerMsg::Dial(addr));
 	}
 }
@@ -1273,7 +1273,7 @@ enum ServiceToWorkerMsg<B: BlockT> {
 	},
 	DisconnectPeer(PeerId, ProtocolName),
 	NewBestBlockImported(B::Hash, NumberFor<B>),
-	Dial(Multiaddr),
+	Dial(DialOpts),
 }
 
 /// Main network worker. Must be polled in order for the network to advance.
@@ -1456,9 +1456,10 @@ where
 					.user_protocol_mut()
 					.new_best_block_imported(hash, number),
 				ServiceToWorkerMsg::Dial(address) => {
-					if let Err(e) = this.network_service.dial(address.clone()) {
-						info!(target: "mixnet", "Could not dial address: {:?}", address);
-						info!(target: "sub-libp2p", "Could not dial address: {:?}", address);
+					let peer_id = address.get_peer_id();
+					if let Err(e) = this.network_service.dial(address) {
+						info!(target: "mixnet", "Could not dial: {:?}", peer_id);
+						info!(target: "sub-libp2p", "Could not dial: {:?}", peer_id);
 					}
 				},
 			}

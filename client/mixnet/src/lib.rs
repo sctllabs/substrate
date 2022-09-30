@@ -26,8 +26,8 @@ use mixnet::{
 	traits::{
 		hash_table::{Configuration as TopoConfigT, Parameters as TopoParams, TopologyHashTable},
 		NewRoutingSet, ShouldConnectTo, Topology,
-	}, MixnetEvent,
-	Error, MixPublicKey, MixnetId, PeerCount, SendOptions,
+	},
+	Error, MixPublicKey, MixnetEvent, MixnetId, PeerCount, SendOptions,
 };
 
 use ambassador::Delegate;
@@ -302,125 +302,120 @@ where
 			let auth_poll = OptionFuture2(auth_poll);
 
 			futures::select! {
-				// TODO poll more than first??
-				auth_address = auth_poll.fuse() => {
-					debug!(target: "mixnet", "Received auth reply {:?}.", auth_address);
-					match auth_address {
-						Ok(Some(addresses)) => {
-						let auth_id = self.authority_queries.get(0).unwrap().clone();
-						for addr in addresses {
-							match sc_network_common::config::parse_addr(addr) {
-								Ok((_peer_id, address)) => {
-									self.network.dial(address);
+							// TODO poll more than first??
+							auth_address = auth_poll.fuse() => {
+								debug!(target: "mixnet", "Received auth reply {:?}.", auth_address);
+								match auth_address {
+									Ok(Some(addresses)) => {
+									let auth_id = self.authority_queries.get(0).unwrap().clone();
+									for addr in addresses {
+										match sc_network_common::config::parse_addr(addr) {
+											Ok((_peer_id, address)) => {
+												self.network.dial(address.into());
+											},
+											Err(_) => continue,
+										};
+									}
+									pop_auth_query = true; // TODO same for Ok(None)?
 								},
-								Err(_) => continue,
-							};
-						}
-						pop_auth_query = true; // TODO same for Ok(None)?
-					},
-					Ok(None) => {
-						pop_auth_query = true; // TODO same for Ok(None)?
-					},
-					Err(e) => {
-						// TODO trace
-						err_auth_query = true;
-					},
-					}
-				},
-
-					notif = self.finality_stream.next() => {
-						// TODO try accessing last of finality stream (possibly skipping some block)
-						if let Some(notif) = notif {
-							delay_finalized.reset(Duration::from_secs(DELAY_NO_FINALISATION_S));
-							self.handle_new_finalize_block(notif);
-						} else {
-							// This point is reached if the other component did shutdown.
-							debug!(target: "mixnet", "Mixnet, shutdown.");
-							return;
-						}
-					},
-					command = self.command_stream.next() => {
-						if let Some(command) = command {
-							self.handle_command(command);
-						} else {
-							// This point is reached if the other component did shutdown.
-							// Shutdown as well.
-							debug!(target: "mixnet", "Mixnet, shutdown.");
-							return;
-						}
-					},
-				event = future::poll_fn(|cx| self.worker.poll(cx)).fuse() => {
-					match event {
-						MixnetEvent::Message(message) =>
-				match message.kind {
-					mixnet::MessageType::FromSurbs(query, recipient) => {
-						trace!(target: "mixnet", "Got surb reply for {:?}", query);
-
-						let result = MixnetImportResult::decode(&mut message.message.as_ref());
-						// Currently we only log reply for mixnet surb, could be send to
-						// some client ws in the future.
-						info!(target: "mixnet", "Received from {:?}, surb {:?}", recipient, result);
-					},
-					kind => {
-						trace!(target: "mixnet", "Received query.");
-						/* TODO probably useless reply we got it in worker
-						let reply = if kind.with_surb() {
-							self.mixnet_command_sender.clone()
-						} else {
-							None
-						};*/
-						unimplemented!("TODO transaction push ! message is a vec")
-
-					//info!(target: "mixnet", "Inject transaction from mixnet from {:?}) tx: {:?}", sender, message);
-					//this.tx_handler_controller.inject_transaction_mixnet(kind, message, reply);
-/*						self.events.push_back(BehaviourOut::MixnetMessage(
-							message.peer,
-							message.message,
-							kind,
-							reply,
-						));
-*/
-						},
-				},
-						MixnetEvent::Connected(_, _) => {
-						},
-						MixnetEvent::Disconnected(disco) => {
-							for (net_id, mix_id, try_reco) in disco {
-								if try_reco {
-									/*
-					if let Some(mixnet_id) = mix_id {
-						self.try_reco(
-							mixnet_id,
-							Some(network_id),
-							self.mixnet_command_sender.clone(),
-						);
-					}
-*/
+								Ok(None) => {
+									pop_auth_query = true; // TODO same for Ok(None)?
+								},
+								Err(e) => {
+									// TODO trace
+									err_auth_query = true;
+								},
 								}
-							}
-						},
-						MixnetEvent::TryConnect(try_co) => {
-							for (net_id, mix_id) in try_co {
-/*						self.try_reco(
-							mix_id,
-							Some(net_id),
-							self.mixnet_command_sender.clone(),
-						);
-*/
-							}
-						},
-						MixnetEvent::None => (),
-						MixnetEvent::Shutdown => {
-							debug!(target: "mixnet", "Mixnet, shutdown.");
-							return;
-						},
-					}
-				},
-					_ = delay_finalized.fuse() => {
-						self.state = State::Synching;
-						delay_finalized.reset(Duration::from_secs(DELAY_NO_FINALISATION_S));
-					},
-			}
+							},
+
+								notif = self.finality_stream.next() => {
+									// TODO try accessing last of finality stream (possibly skipping some block)
+									if let Some(notif) = notif {
+										delay_finalized.reset(Duration::from_secs(DELAY_NO_FINALISATION_S));
+										self.handle_new_finalize_block(notif);
+									} else {
+										// This point is reached if the other component did shutdown.
+										debug!(target: "mixnet", "Mixnet, shutdown.");
+										return;
+									}
+								},
+								command = self.command_stream.next() => {
+									if let Some(command) = command {
+										self.handle_command(command);
+									} else {
+										// This point is reached if the other component did shutdown.
+										// Shutdown as well.
+										debug!(target: "mixnet", "Mixnet, shutdown.");
+										return;
+									}
+								},
+							event = future::poll_fn(|cx| self.worker.poll(cx)).fuse() => {
+								match event {
+									MixnetEvent::Message(message) =>
+							match message.kind {
+								mixnet::MessageType::FromSurbs(query, recipient) => {
+									trace!(target: "mixnet", "Got surb reply for {:?}", query);
+
+									let result = MixnetImportResult::decode(&mut message.message.as_ref());
+									// Currently we only log reply for mixnet surb, could be send to
+									// some client ws in the future.
+									info!(target: "mixnet", "Received from {:?}, surb {:?}", recipient, result);
+								},
+								kind => {
+									trace!(target: "mixnet", "Received query.");
+									/* TODO probably useless reply we got it in worker
+									let reply = if kind.with_surb() {
+										self.mixnet_command_sender.clone()
+									} else {
+										None
+									};*/
+									unimplemented!("TODO transaction push ! message is a vec")
+
+								//info!(target: "mixnet", "Inject transaction from mixnet from {:?}) tx: {:?}", sender, message);
+								//this.tx_handler_controller.inject_transaction_mixnet(kind, message, reply);
+			/*						self.events.push_back(BehaviourOut::MixnetMessage(
+										message.peer,
+										message.message,
+										kind,
+										reply,
+									));
+			*/
+									},
+							},
+									MixnetEvent::Connected(_, _) => {
+									},
+									MixnetEvent::Disconnected(disco) => {
+										for (net_id, mix_id, try_reco) in disco {
+											if try_reco {
+								if let Some(mix_id) = mix_id {
+									self.try_reco(
+										mix_id,
+										Some(net_id),
+									);
+								}
+											}
+										}
+									},
+									MixnetEvent::TryConnect(try_co) => {
+										for (mix_id, net_id) in try_co {
+									self.try_reco(
+										mix_id,
+										net_id,
+									);
+										}
+									},
+									MixnetEvent::None => (),
+									MixnetEvent::Shutdown => {
+										debug!(target: "mixnet", "Mixnet, shutdown.");
+										return;
+									},
+								}
+							},
+								_ = delay_finalized.fuse() => {
+									self.state = State::Synching;
+									delay_finalized.reset(Duration::from_secs(DELAY_NO_FINALISATION_S));
+								},
+						}
 			if pop_auth_query {
 				self.authority_queries.pop_front();
 				self.authority_replies.pop_front();
@@ -446,6 +441,47 @@ where
 							}
 						} else {
 							debug!(target: "mixnet", "Non authority node not dialing.");
+						}
+					}
+				}
+			}
+		}
+	}
+
+	fn try_reco(&mut self, mix_id: MixnetId, net_id: Option<NetworkId>) {
+		if let Some(net_id) = net_id {
+			log::trace!(target: "mixnet", "Dialing to {:?}", mix_id);
+			self.network.dial(net_id.into());
+		} else {
+			let topology = &mut self.worker.mixnet_mut().topology;
+			let mut found = None;
+			for (grandpa, im_online) in topology.sessions.iter() {
+				if im_online.1 == mix_id {
+					found = Some(grandpa);
+					break
+				}
+			}
+			if let Some(authority_id) = found {
+				if let Some(authority_discovery_id) = topology.sessions_disc.get(&authority_id) {
+					if let Ok(auth_public) = authority_discovery_id.1.as_slice().try_into() {
+						if let Ok(grandpa_id) = authority_id.1.as_slice().try_into() {
+							self.authority_queries.push_back(AuthorityInfo {
+								grandpa_id,
+								authority_discovery_id: authority_discovery_id.clone(),
+							});
+
+							if let Some(service) = self.authority_discovery_service.as_mut() {
+								if let Some(rx) =
+									service.get_addresses_by_authority_id_callback(auth_public)
+								{
+									self.authority_replies.push_back(Some(rx));
+								} else {
+									debug!(target: "mixnet", "Query authority full channel.");
+									self.authority_replies.push_back(None);
+								}
+							} else {
+								debug!(target: "mixnet", "Non authority node not dialing.");
+							}
 						}
 					}
 				}
@@ -508,43 +544,7 @@ where
 				} else {
 					let _ = reply.send(Err(mixnet::Error::NotReady));
 				},
-			MixnetCommand::TryReco(mix_id) => {
-				// TODO rev index
-				let topology = &mut self.worker.mixnet_mut().topology;
-				let mut found = None;
-				for (grandpa, im_online) in topology.sessions.iter() {
-					if im_online.1 == mix_id {
-						found = Some(grandpa);
-						break
-					}
-				}
-				if let Some(authority_id) = found {
-					if let Some(authority_discovery_id) = topology.sessions_disc.get(&authority_id)
-					{
-						if let Ok(auth_public) = authority_discovery_id.1.as_slice().try_into() {
-							if let Ok(grandpa_id) = authority_id.1.as_slice().try_into() {
-								self.authority_queries.push_back(AuthorityInfo {
-									grandpa_id,
-									authority_discovery_id: authority_discovery_id.clone(),
-								});
-
-								if let Some(service) = self.authority_discovery_service.as_mut() {
-									if let Some(rx) =
-										service.get_addresses_by_authority_id_callback(auth_public)
-									{
-										self.authority_replies.push_back(Some(rx));
-									} else {
-										debug!(target: "mixnet", "Query authority full channel.");
-										self.authority_replies.push_back(None);
-									}
-								} else {
-									debug!(target: "mixnet", "Non authority node not dialing.");
-								}
-							}
-						}
-					}
-				}
-			},
+			MixnetCommand::TryReco(mix_id) => (),
 		}
 	}
 

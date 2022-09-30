@@ -26,7 +26,7 @@ use crate::{
 };
 use futures::{channel::oneshot, Stream};
 pub use libp2p::{identity::error::SigningError, kad::record::Key as KademliaKey};
-use libp2p::{Multiaddr, PeerId};
+use libp2p::{swarm::dial_opts::DialOpts, Multiaddr, PeerId};
 use sc_peerset::ReputationChange;
 pub use signature::Signature;
 use sp_runtime::traits::{Block as BlockT, NumberFor};
@@ -255,7 +255,7 @@ pub trait NetworkPeers {
 	/// or a mixnet related one
 	/// TODO in another trait or it's own.
 	/// or a mixnet related one (+ transaction from mixnet handling)
-	fn dial(&self, addr: Multiaddr);
+	fn dial(&self, addr: DialOpts);
 }
 
 // Manual implementation to avoid extra boxing here
@@ -336,7 +336,7 @@ where
 		T::sync_num_connected(self)
 	}
 
-	fn dial(&self, addr: Multiaddr) {
+	fn dial(&self, addr: DialOpts) {
 		T::dial(self, addr)
 	}
 }
