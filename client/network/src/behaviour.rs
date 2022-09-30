@@ -35,11 +35,10 @@ use libp2p::{
 	},
 	NetworkBehaviour,
 };
-use log::{debug, info, trace};
+use log::debug;
 
 pub use crate::request_responses::{InboundFailure, OutboundFailure, RequestId, ResponseFailure};
-use mixnet::{BehaviourEvent as MixnetEvent, MixnetBehaviour, MixnetId};
-use sc_client_api::{BlockBackend, ProofProvider};
+use mixnet::{BehaviourEvent as MixnetEvent, MixnetBehaviour};
 use sc_consensus::import_queue::{IncomingBlock, RuntimeOrigin};
 use sc_network_common::{
 	config::ProtocolId,
@@ -48,7 +47,7 @@ use sc_network_common::{
 		ProtocolName,
 	},
 	request_responses::{IfDisconnected, ProtocolConfig, RequestFailure},
-	MixnetCommand, MixnetImportResult,
+	MixnetCommand,
 };
 use sc_peerset::PeersetHandle;
 use sp_blockchain::HeaderBackend;

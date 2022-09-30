@@ -1,5 +1,3 @@
-
-
 // Copyright (C) 2017-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
@@ -33,7 +31,7 @@ pub trait ExHashT: std::hash::Hash + Eq + std::fmt::Debug + Clone + Send + Sync 
 impl<T> ExHashT for T where T: std::hash::Hash + Eq + std::fmt::Debug + Clone + Send + Sync + 'static
 {}
 
-use codec::{Encode, Decode};
+use codec::{Decode, Encode};
 
 // TODO move at proper place
 /// Command for the mixnet worker.
@@ -41,9 +39,11 @@ pub enum MixnetCommand {
 	/// Result of transaction to send back in mixnet.
 	TransactionImportResult(Box<mixnet::SurbsPayload>, MixnetImportResult),
 	/// Result of transaction to send back in mixnet.
-	SendTransaction(Vec<u8>, mixnet::SendOptions, futures::channel::oneshot::Sender<Result<(), mixnet::Error>>),
-	/// Try reconnect when an address need to be resolved.
-	TryReco(mixnet::MixnetId),
+	SendTransaction(
+		Vec<u8>,
+		mixnet::SendOptions,
+		futures::channel::oneshot::Sender<Result<(), mixnet::Error>>,
+	),
 }
 
 // TODO move at proper place
@@ -61,5 +61,3 @@ pub enum MixnetImportResult {
 	/// Import skipped.
 	Skipped,
 }
-
-

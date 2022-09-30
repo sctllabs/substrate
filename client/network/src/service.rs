@@ -359,7 +359,6 @@ where
 			let behaviour = {
 				let mut mixnet = None;
 				if let Some((mixnet_in, mixnet_out, command_sender)) = params.mixnet {
-					let keep_connection_alive = true;
 					mixnet = Some((MixnetBehaviour::new(mixnet_in, mixnet_out), command_sender));
 				};
 
@@ -1458,8 +1457,8 @@ where
 				ServiceToWorkerMsg::Dial(address) => {
 					let peer_id = address.get_peer_id();
 					if let Err(e) = this.network_service.dial(address) {
-						info!(target: "mixnet", "Could not dial: {:?}", peer_id);
-						info!(target: "sub-libp2p", "Could not dial: {:?}", peer_id);
+						info!(target: "mixnet", "Could not dial: {:?}, {:?}", peer_id, e);
+						info!(target: "sub-libp2p", "Could not dial: {:?}, {:?}", peer_id, e);
 					}
 				},
 			}

@@ -26,9 +26,7 @@
 //! - Use [`TransactionsHandlerPrototype::build`] then [`TransactionsHandler::run`] to obtain a
 //! `Future` that processes transactions.
 
-use sc_network_common::{
-	MixnetCommand, MixnetImportResult,
-};
+use sc_network_common::{MixnetCommand, MixnetImportResult};
 
 use crate::config::*;
 use codec::{Decode, Encode};
@@ -408,9 +406,7 @@ where
 	}
 
 	fn inject_transaction(&mut self, who: PeerId, transactions: Vec<u8>) {
-		if let Ok(t) =
-			<Transactions<B::Extrinsic> as Decode>::decode(&mut transactions.as_ref())
-		{
+		if let Ok(t) = <Transactions<B::Extrinsic> as Decode>::decode(&mut transactions.as_ref()) {
 			self.on_transactions(who, t);
 		} else {
 			warn!(target: "sub-libp2p", "Failed to decode external transactions list");
@@ -425,7 +421,8 @@ where
 		transactions: Vec<u8>,
 		reply: Option<futures::channel::mpsc::Sender<MixnetCommand>>,
 	) {
-		if let Ok(transactions) = <Transactions<B::Extrinsic> as Decode>::decode(&mut transactions.as_ref())
+		if let Ok(transactions) =
+			<Transactions<B::Extrinsic> as Decode>::decode(&mut transactions.as_ref())
 		{
 			trace!(target: "sync", "Received {} transactions from mixnet", transactions.len());
 			if !self.service.is_major_syncing() {
