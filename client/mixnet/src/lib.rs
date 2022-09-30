@@ -100,7 +100,8 @@ impl TopoConfigT for TopoConfig {
 
 	const EXTERNAL_BANDWIDTH: (usize, usize) = (1, 10);
 
-	const DEFAULT_PARAMETERS: TopoParams = TopoParams { max_external: Some(10), number_consumer_connection: Some(1) };
+	const DEFAULT_PARAMETERS: TopoParams =
+		TopoParams { max_external: Some(10), number_consumer_connection: Some(1) };
 }
 
 /// Mixnet running worker.
