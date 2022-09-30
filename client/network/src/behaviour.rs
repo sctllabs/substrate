@@ -48,6 +48,7 @@ use sc_network_common::{
 		ProtocolName,
 	},
 	request_responses::{IfDisconnected, ProtocolConfig, RequestFailure},
+	MixnetCommand, MixnetImportResult,
 };
 use sc_peerset::PeersetHandle;
 use sp_blockchain::HeaderBackend;
@@ -62,31 +63,6 @@ use std::{
 	task::{Context, Poll},
 	time::Duration,
 };
-
-/// Command for the mixnet worker.
-pub enum MixnetCommand {
-	/// Result of transaction to send back in mixnet.
-	TransactionImportResult(Box<mixnet::SurbsPayload>, MixnetImportResult),
-	/// Result of transaction to send back in mixnet.
-	SendTransaction(Vec<u8>, mixnet::SendOptions, oneshot::Sender<Result<(), mixnet::Error>>),
-	/// Try reconnect when an address need to be resolved.
-	TryReco(MixnetId),
-}
-
-/// Result reported in surb for a transaction imported from a mixnet.
-#[derive(Debug, Encode, Decode)]
-pub enum MixnetImportResult {
-	/// Succesfully managed transaction.
-	Success,
-	/// Could not decode.
-	BadEncoding,
-	/// Transaction is invalid.
-	BadTransaction,
-	/// Client error.
-	Error,
-	/// Import skipped.
-	Skipped,
-}
 
 /// General behaviour of the network. Combines all protocols together.
 #[derive(NetworkBehaviour)]

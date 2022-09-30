@@ -47,7 +47,8 @@ use log::{debug, error, info, trace, warn};
 use metrics::{PacketsKind, PacketsResult};
 use prometheus_endpoint::Registry as PrometheusRegistry;
 use sc_client_api::{BlockchainEvents, FinalityNotification, UsageProvider};
-use sc_network::{MixnetCommand, PeerId as NetworkId};
+use sc_network_common::{MixnetCommand, MixnetImportResult};
+use sc_network::PeerId as NetworkId; // TODO from mixnet and remove sc_network dep
 use sc_network_common::service::NetworkPeers;
 
 use sc_utils::mpsc::tracing_unbounded;
@@ -103,6 +104,7 @@ impl TopoConfigT for TopoConfig {
 	const DEFAULT_PARAMETERS: TopoParams =
 		TopoParams { max_external: Some(10), number_consumer_connection: Some(1) };
 }
+use sc_network_transactions::TransactionsHandlerController;
 
 /// Mixnet running worker.
 pub struct MixnetWorker<B: BlockT, C, N> {
@@ -125,14 +127,17 @@ pub struct MixnetWorker<B: BlockT, C, N> {
 	authority_queries: VecDeque<AuthorityInfo>,
 	key_store: Arc<dyn SyncCryptoStore>,
 	network: Arc<N>,
+	tx_handler_controller: TransactionsHandlerController<<B as BlockT>::Hash>,
 }
 
 type WorkerChannels = (mixnet::WorkerChannels, futures::channel::mpsc::Receiver<MixnetCommand>);
 
 type AuthorityRx = oneshot::Receiver<Option<HashSet<sc_network::Multiaddr>>>;
+
+
 #[derive(PartialEq, Eq)]
 enum State {
-	Synching,
+	Synching, // TODO check for synching with service is_major_syncing api and remove useless code.
 	WaitingMorePeers,
 	Running,
 }
@@ -171,6 +176,7 @@ where
 		key_store: Arc<dyn SyncCryptoStore>,
 		metrics: Option<PrometheusRegistry>,
 		authority_discovery_service: Option<sc_authority_discovery::Service>,
+		tx_handler_controller: TransactionsHandlerController<<B as BlockT>::Hash>,
 	) -> Option<Self> {
 		let mut local_public_key = None;
 		// get the peer id, could be another one than the one define in session: in this
@@ -248,6 +254,7 @@ where
 			authority_queries: VecDeque::new(),
 			authority_replies: VecDeque::new(),
 			network,
+			tx_handler_controller,
 		})
 	}
 
@@ -1340,18 +1347,3 @@ impl<F: futures::Future + Unpin> futures::Future for OptionFuture2<F> {
 						}
 					},
 */
-
-/// Result reported in surb for a transaction imported from a mixnet.
-#[derive(Debug, Encode, Decode)]
-pub enum MixnetImportResult {
-	/// Succesfully managed transaction.
-	Success,
-	/// Could not decode.
-	BadEncoding,
-	/// Transaction is invalid.
-	BadTransaction,
-	/// Client error.
-	Error,
-	/// Import skipped.
-	Skipped,
-}

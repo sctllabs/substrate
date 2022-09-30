@@ -476,7 +476,7 @@ where
 						debug!("Error converting pool error: {}", e);
 						// it is not bad at least, just some internal node logic error, so peer is
 						// innocent.
-						TransactionImport::ErrorIgnore
+						TransactionImport::KnownGood
 					},
 				},
 			}

@@ -26,13 +26,8 @@
 //! - Use [`TransactionsHandlerPrototype::build`] then [`TransactionsHandler::run`] to obtain a
 //! `Future` that processes transactions.
 
-use crate::{
-	behaviour::{MixnetCommand, MixnetImportResult},
-	error,
-	protocol::message,
-	service::NetworkService,
-	utils::{interval, LruHashSet},
-	ExHashT,
+use sc_network_common::{
+	MixnetCommand, MixnetImportResult,
 };
 
 use crate::config::*;
@@ -123,7 +118,6 @@ impl<H: ExHashT> Future for PendingTransaction<H> {
 					TransactionImport::KnownGood => MixnetImportResult::Success,
 					TransactionImport::NewGood => MixnetImportResult::Success,
 					TransactionImport::Bad => MixnetImportResult::BadTransaction,
-					TransactionImport::ErrorIgnore => MixnetImportResult::Error,
 					TransactionImport::None => MixnetImportResult::Skipped,
 				};
 				if let Err(e) =
@@ -223,6 +217,7 @@ impl TransactionsHandlerPrototype {
 }
 
 /// Controls the behaviour of a [`TransactionsHandler`] it is connected to.
+#[derive(Clone)]
 pub struct TransactionsHandlerController<H: ExHashT> {
 	to_handler: mpsc::UnboundedSender<ToHandler<H>>,
 }
@@ -414,7 +409,7 @@ where
 
 	fn inject_transaction(&mut self, who: PeerId, transactions: Vec<u8>) {
 		if let Ok(t) =
-			<message::Transactions<B::Extrinsic> as Decode>::decode(&mut transactions.as_ref())
+			<Transactions<B::Extrinsic> as Decode>::decode(&mut transactions.as_ref())
 		{
 			self.on_transactions(who, t);
 		} else {
@@ -430,11 +425,11 @@ where
 		transactions: Vec<u8>,
 		reply: Option<futures::channel::mpsc::Sender<MixnetCommand>>,
 	) {
-		if let Ok(transactions) = <Vec<B::Extrinsic> as Decode>::decode(&mut transactions.as_ref())
+		if let Ok(transactions) = <Transactions<B::Extrinsic> as Decode>::decode(&mut transactions.as_ref())
 		{
 			trace!(target: "sync", "Received {} transactions from mixnet", transactions.len());
-			if !self.gossip_enabled.load(Ordering::Relaxed) {
-				trace!(target: "sync", "Ignoring mixnet transactions while disabled");
+			if !self.service.is_major_syncing() {
+				trace!(target: "sync", "Ignoring mixnet transactions while major syncinc");
 				return
 			}
 
@@ -516,7 +511,6 @@ where
 				self.service.report_peer(who, rep::ANY_TRANSACTION_REFUND),
 			TransactionImport::NewGood => self.service.report_peer(who, rep::GOOD_TRANSACTION),
 			TransactionImport::Bad => self.service.report_peer(who, rep::BAD_TRANSACTION),
-			TransactionImport::ErrorIgnore => {},
 			TransactionImport::None => {},
 		}
 	}

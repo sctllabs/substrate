@@ -728,7 +728,7 @@ pub struct BuildNetworkParams<'a, TBl: BlockT, TExPool, TImpQu, TCl> {
 	pub mixnet: Option<(
 		sc_mixnet::SinkToWorker,
 		sc_mixnet::StreamFromWorker,
-		futures::channel::mpsc::Sender<sc_network::MixnetCommand>,
+		futures::channel::mpsc::Sender<sc_network_common::MixnetCommand>,
 	)>,
 }
 /// Build the network service, the network status sinks and an RPC sender.
@@ -965,7 +965,7 @@ where
 		future.await
 	});
 
-	Ok((network, system_rpc_tx, tx_handler_controller, mixnet_tx, NetworkStarter(network_start_tx)))
+	Ok((network, system_rpc_tx, mixnet_tx, tx_handler_controller, NetworkStarter(network_start_tx)))
 }
 
 /// Object used to start the network.

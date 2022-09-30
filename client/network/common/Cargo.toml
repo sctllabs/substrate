@@ -37,3 +37,4 @@ sp-finality-grandpa = { version = "4.0.0-dev", path = "../../../primitives/final
 sp-runtime = { version = "6.0.0", path = "../../../primitives/runtime" }
 sp-blockchain = { version = "4.0.0-dev", path = "../../../primitives/blockchain" }
 thiserror = "1.0"
+mixnet = { git = "https://github.com/paritytech/mixnet" }

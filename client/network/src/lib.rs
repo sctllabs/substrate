@@ -255,7 +255,6 @@ mod transport;
 pub mod config;
 pub mod network_state;
 
-pub use behaviour::MixnetCommand;
 #[doc(inline)]
 pub use libp2p::{multiaddr, Multiaddr, PeerId};
 pub use protocol::PeerInfo;

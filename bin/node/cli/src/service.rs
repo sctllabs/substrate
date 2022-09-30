@@ -368,7 +368,7 @@ pub fn new_full_base(
 		mixnet_worker = Some((authority_set, mixnet_to_network, local_id, metrics));
 	}
 
-	let (network, system_rpc_tx, tx_handler_controller, mixnet_tx, network_starter) =
+	let (network, system_rpc_tx, mixnet_tx, tx_handler_controller, network_starter) =
 		sc_service::build_network(sc_service::BuildNetworkParams {
 			config: &config,
 			client: client.clone(),
@@ -406,7 +406,7 @@ pub fn new_full_base(
 		transaction_pool: transaction_pool.clone(),
 		task_manager: &mut task_manager,
 		system_rpc_tx,
-		tx_handler_controller,
+		tx_handler_controller: tx_handler_controller.clone(),
 		mixnet_tx,
 		telemetry: telemetry.as_mut(),
 	})?;
@@ -575,6 +575,7 @@ pub fn new_full_base(
 			keystore_container.sync_keystore(),
 			metrics,
 			authority_discovery_service,
+			tx_handler_controller,
 		) {
 			task_manager
 				.spawn_handle()

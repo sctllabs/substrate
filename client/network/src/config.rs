@@ -131,7 +131,7 @@ where
 	pub mixnet: Option<(
 		mixnet::SinkToWorker,
 		mixnet::StreamFromWorker,
-		futures::channel::mpsc::Sender<crate::MixnetCommand>,
+		futures::channel::mpsc::Sender<sc_network_common::MixnetCommand>,
 	)>,
 
 	/// Request response protocol configurations
