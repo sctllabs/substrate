@@ -121,6 +121,7 @@ pub struct MixnetWorker<B: BlockT, C, N> {
 	client: Arc<C>,
 	state: State,
 	// External command.
+	command_sender: futures::channel::mpsc::Sender<MixnetCommand>,
 	command_stream: futures::channel::mpsc::Receiver<MixnetCommand>,
 	authority_discovery_service: Option<sc_authority_discovery::Service>,
 	authority_replies: VecDeque<Option<AuthorityRx>>,
@@ -130,7 +131,7 @@ pub struct MixnetWorker<B: BlockT, C, N> {
 	tx_handler_controller: TransactionsHandlerController<<B as BlockT>::Hash>,
 }
 
-type WorkerChannels = (mixnet::WorkerChannels, futures::channel::mpsc::Receiver<MixnetCommand>);
+type WorkerChannels = (mixnet::WorkerChannels, futures::channel::mpsc::Receiver<MixnetCommand>, futures::channel::mpsc::Sender<MixnetCommand>);
 
 type AuthorityRx = oneshot::Receiver<Option<HashSet<sc_network::Multiaddr>>>;
 
@@ -150,7 +151,7 @@ pub fn new_channels(
 	let (from_worker_sink, from_worker_stream) = tracing_unbounded("mpsc_mixnet_out");
 	let (command_sink, command_stream) = futures::channel::mpsc::channel(COMMAND_BUFFER_SIZE);
 	(
-		((Box::new(from_worker_sink), Box::new(to_worker_stream)), command_stream),
+		((Box::new(from_worker_sink), Box::new(to_worker_stream)), command_stream, command_sink.clone()),
 		(Box::new(to_worker_sink), Box::new(from_worker_stream), command_sink),
 	)
 }
@@ -249,6 +250,7 @@ where
 			client,
 			state,
 			authority_discovery_service,
+			command_sender: inner_channels.2,
 			command_stream: inner_channels.1,
 			key_store,
 			authority_queries: VecDeque::new(),
@@ -370,23 +372,14 @@ where
 								},
 								kind => {
 									trace!(target: "mixnet", "Received query.");
-									/* TODO probably useless reply we got it in worker
 									let reply = if kind.with_surb() {
-										self.mixnet_command_sender.clone()
+										Some(self.command_sender.clone())
 									} else {
 										None
-									};*/
-									unimplemented!("TODO transaction push ! message is a vec")
+									};
 
-								//info!(target: "mixnet", "Inject transaction from mixnet from {:?}) tx: {:?}", sender, message);
-								//this.tx_handler_controller.inject_transaction_mixnet(kind, message, reply);
-			/*						self.events.push_back(BehaviourOut::MixnetMessage(
-										message.peer,
-										message.message,
-										kind,
-										reply,
-									));
-			*/
+								info!(target: "mixnet", "Inject transaction from mixnet, tx: {:?}",  message.message);
+								self.tx_handler_controller.inject_transaction_mixnet(kind, message.message, reply);
 									},
 							},
 									MixnetEvent::Connected(_, _) => {
@@ -1309,41 +1302,3 @@ impl<F: futures::Future + Unpin> futures::Future for OptionFuture2<F> {
 		}
 	}
 }
-
-/*
-	// TODO type alias for the sender!!!
-	fn try_reco(
-		&mut self,
-		mixnet_id: MixnetId,
-		network_id: Option<PeerId>,
-		forward: Option<futures::channel::mpsc::Sender<MixnetCommand>>,
-	) {
-		self.events
-			.push_back(BehaviourOut::MixnetTryReco(mixnet_id, network_id, forward));
-	}
-*/
-/*
-				Poll::Ready(SwarmEvent::Behaviour(BehaviourOut::MixnetTryReco(
-					mixnet_id,
-					net_id,
-					mut reply,
-				))) =>
-					if let Some(net_id) = net_id {
-						let e = this.network_service.dial(net_id);
-						if let Err(DialError::NoAddresses) = e {
-							if let Some(Err(e)) = reply
-								.as_mut()
-								.map(|r| r.start_send(behaviour::MixnetCommand::TryReco(mixnet_id)))
-							{
-								trace!(target: "mixnet", "Channel issue could not try reco {:?}", e);
-							}
-						}
-					} else {
-						if let Some(Err(e)) = reply
-							.as_mut()
-							.map(|r| r.start_send(behaviour::MixnetCommand::TryReco(mixnet_id)))
-						{
-							trace!(target: "mixnet", "Channel issue could not try reco {:?}", e);
-						}
-					},
-*/
