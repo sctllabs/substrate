@@ -614,46 +614,7 @@ where
 {
 	fn inject_event(&mut self, event: MixnetEvent) {
 		match event {
-			MixnetEvent::Message(message) => {
-				match message.kind {
-					mixnet::MessageType::FromSurbs(query, recipient) => {
-						trace!(target: "mixnet", "Got surb reply for {:?}", query);
-
-						let result = MixnetImportResult::decode(&mut message.message.as_ref());
-						// Currently we only log reply for mixnet surb, could be send to
-						// some client ws in the future.
-						info!(target: "mixnet", "Received from {:?}, surb {:?}", recipient, result);
-					},
-					kind => {
-						trace!(target: "mixnet", "Received query.");
-						let reply = if kind.with_surb() {
-							self.mixnet_command_sender.clone()
-						} else {
-							None
-						};
-						self.events.push_back(BehaviourOut::MixnetMessage(
-							message.peer,
-							message.message,
-							kind,
-							reply,
-						));
-					},
-				}
-			},
-			MixnetEvent::Connected(_peer_id, _pub_key) => {},
-			MixnetEvent::Disconnected(network_id, mixnet_id, try_reco) =>
-				if try_reco {
-					if let Some(mixnet_id) = mixnet_id {
-						self.try_reco(
-							mixnet_id,
-							Some(network_id),
-							self.mixnet_command_sender.clone(),
-						);
-					}
-				},
-			MixnetEvent::TryConnect(mixnet_id, network_id) => {
-				self.try_reco(mixnet_id, network_id, self.mixnet_command_sender.clone());
-			},
+			MixnetEvent::None => {},
 			MixnetEvent::CloseStream => {
 				log::error!(target: "mixnet", "Stream close, no message incomming.");
 			},
@@ -677,16 +638,5 @@ where
 		}
 
 		Poll::Pending
-	}
-
-	// TODO type alias for the sender!!!
-	fn try_reco(
-		&mut self,
-		mixnet_id: MixnetId,
-		network_id: Option<PeerId>,
-		forward: Option<futures::channel::mpsc::Sender<MixnetCommand>>,
-	) {
-		self.events
-			.push_back(BehaviourOut::MixnetTryReco(mixnet_id, network_id, forward));
 	}
 }

@@ -1701,38 +1701,6 @@ where
 
 					this.event_streams.send(Event::Dht(event));
 				},
-				Poll::Ready(SwarmEvent::Behaviour(BehaviourOut::MixnetMessage(
-					sender,
-					message,
-					kind,
-					reply,
-				))) => {
-					info!(target: "mixnet", "Inject transaction from mixnet from {:?}) tx: {:?}", sender, message);
-					this.tx_handler_controller.inject_transaction_mixnet(kind, message, reply);
-				},
-				Poll::Ready(SwarmEvent::Behaviour(BehaviourOut::MixnetTryReco(
-					mixnet_id,
-					net_id,
-					mut reply,
-				))) =>
-					if let Some(net_id) = net_id {
-						let e = this.network_service.dial(net_id);
-						if let Err(DialError::NoAddresses) = e {
-							if let Some(Err(e)) = reply
-								.as_mut()
-								.map(|r| r.start_send(behaviour::MixnetCommand::TryReco(mixnet_id)))
-							{
-								trace!(target: "mixnet", "Channel issue could not try reco {:?}", e);
-							}
-						}
-					} else {
-						if let Some(Err(e)) = reply
-							.as_mut()
-							.map(|r| r.start_send(behaviour::MixnetCommand::TryReco(mixnet_id)))
-						{
-							trace!(target: "mixnet", "Channel issue could not try reco {:?}", e);
-						}
-					},
 				Poll::Ready(SwarmEvent::ConnectionEstablished {
 					peer_id,
 					endpoint,

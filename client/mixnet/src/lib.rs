@@ -26,7 +26,7 @@ use mixnet::{
 	traits::{
 		hash_table::{Configuration as TopoConfigT, Parameters as TopoParams, TopologyHashTable},
 		NewRoutingSet, ShouldConnectTo, Topology,
-	},
+	}, MixnetEvent,
 	Error, MixPublicKey, MixnetId, PeerCount, SendOptions,
 };
 
@@ -35,7 +35,7 @@ pub use mixnet::{ambassador_impl_Topology, Config, SinkToWorker, StreamFromWorke
 use sp_application_crypto::key_types;
 use sp_keystore::SyncCryptoStore;
 
-use codec::Encode;
+use codec::{Decode, Encode};
 use futures::{
 	channel::{mpsc::SendError, oneshot},
 	future,
@@ -43,7 +43,7 @@ use futures::{
 	FutureExt, StreamExt,
 };
 use futures_timer::Delay;
-use log::{debug, error, trace, warn};
+use log::{debug, error, info, trace, warn};
 use metrics::{PacketsKind, PacketsResult};
 use prometheus_endpoint::Registry as PrometheusRegistry;
 use sc_client_api::{BlockchainEvents, FinalityNotification, UsageProvider};
@@ -309,7 +309,7 @@ where
 						Ok(Some(addresses)) => {
 						let auth_id = self.authority_queries.get(0).unwrap().clone();
 						for addr in addresses {
-							match sc_network::config::parse_addr(addr) {
+							match sc_network_common::config::parse_addr(addr) {
 								Ok((_peer_id, address)) => {
 									self.network.dial(address);
 								},
@@ -349,12 +349,73 @@ where
 							return;
 						}
 					},
-					success = future::poll_fn(|cx| self.worker.poll(cx)).fuse() => {
-						if !success {
+				event = future::poll_fn(|cx| self.worker.poll(cx)).fuse() => {
+					match event {
+						MixnetEvent::Message(message) =>
+				match message.kind {
+					mixnet::MessageType::FromSurbs(query, recipient) => {
+						trace!(target: "mixnet", "Got surb reply for {:?}", query);
+
+						let result = MixnetImportResult::decode(&mut message.message.as_ref());
+						// Currently we only log reply for mixnet surb, could be send to
+						// some client ws in the future.
+						info!(target: "mixnet", "Received from {:?}, surb {:?}", recipient, result);
+					},
+					kind => {
+						trace!(target: "mixnet", "Received query.");
+						/* TODO probably useless reply we got it in worker
+						let reply = if kind.with_surb() {
+							self.mixnet_command_sender.clone()
+						} else {
+							None
+						};*/
+						unimplemented!("TODO transaction push ! message is a vec")
+
+					//info!(target: "mixnet", "Inject transaction from mixnet from {:?}) tx: {:?}", sender, message);
+					//this.tx_handler_controller.inject_transaction_mixnet(kind, message, reply);
+/*						self.events.push_back(BehaviourOut::MixnetMessage(
+							message.peer,
+							message.message,
+							kind,
+							reply,
+						));
+*/
+						},
+				},
+						MixnetEvent::Connected(_, _) => {
+						},
+						MixnetEvent::Disconnected(disco) => {
+							for (net_id, mix_id, try_reco) in disco {
+								if try_reco {
+									/*
+					if let Some(mixnet_id) = mix_id {
+						self.try_reco(
+							mixnet_id,
+							Some(network_id),
+							self.mixnet_command_sender.clone(),
+						);
+					}
+*/
+								}
+							}
+						},
+						MixnetEvent::TryConnect(try_co) => {
+							for (net_id, mix_id) in try_co {
+/*						self.try_reco(
+							mix_id,
+							Some(net_id),
+							self.mixnet_command_sender.clone(),
+						);
+*/
+							}
+						},
+						MixnetEvent::None => (),
+						MixnetEvent::Shutdown => {
 							debug!(target: "mixnet", "Mixnet, shutdown.");
 							return;
-						}
-					},
+						},
+					}
+				},
 					_ = delay_finalized.fuse() => {
 						self.state = State::Synching;
 						delay_finalized.reset(Duration::from_secs(DELAY_NO_FINALISATION_S));
@@ -1240,4 +1301,57 @@ impl<F: futures::Future + Unpin> futures::Future for OptionFuture2<F> {
 			None => futures::task::Poll::Pending,
 		}
 	}
+}
+
+/*
+	// TODO type alias for the sender!!!
+	fn try_reco(
+		&mut self,
+		mixnet_id: MixnetId,
+		network_id: Option<PeerId>,
+		forward: Option<futures::channel::mpsc::Sender<MixnetCommand>>,
+	) {
+		self.events
+			.push_back(BehaviourOut::MixnetTryReco(mixnet_id, network_id, forward));
+	}
+*/
+/*
+				Poll::Ready(SwarmEvent::Behaviour(BehaviourOut::MixnetTryReco(
+					mixnet_id,
+					net_id,
+					mut reply,
+				))) =>
+					if let Some(net_id) = net_id {
+						let e = this.network_service.dial(net_id);
+						if let Err(DialError::NoAddresses) = e {
+							if let Some(Err(e)) = reply
+								.as_mut()
+								.map(|r| r.start_send(behaviour::MixnetCommand::TryReco(mixnet_id)))
+							{
+								trace!(target: "mixnet", "Channel issue could not try reco {:?}", e);
+							}
+						}
+					} else {
+						if let Some(Err(e)) = reply
+							.as_mut()
+							.map(|r| r.start_send(behaviour::MixnetCommand::TryReco(mixnet_id)))
+						{
+							trace!(target: "mixnet", "Channel issue could not try reco {:?}", e);
+						}
+					},
+*/
+
+/// Result reported in surb for a transaction imported from a mixnet.
+#[derive(Debug, Encode, Decode)]
+pub enum MixnetImportResult {
+	/// Succesfully managed transaction.
+	Success,
+	/// Could not decode.
+	BadEncoding,
+	/// Transaction is invalid.
+	BadTransaction,
+	/// Client error.
+	Error,
+	/// Import skipped.
+	Skipped,
 }
