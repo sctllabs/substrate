@@ -335,71 +335,69 @@ where
 					},
 					}
 				},
-
-					notif = self.finality_stream.next() => {
-						// TODO try accessing last of finality stream (possibly skipping some block)
-						if let Some(notif) = notif {
-							self.check_session_change(notif);
-						} else {
-							// This point is reached if the other component did shutdown.
-							debug!(target: "mixnet", "Mixnet, shutdown.");
-							return;
-						}
-					},
-					command = self.command_stream.next() => {
-						if let Some(command) = command {
-							self.handle_command(command);
-						} else {
-							// This point is reached if the other component did shutdown.
-							// Shutdown as well.
-							debug!(target: "mixnet", "Mixnet, shutdown.");
-							return;
-						}
-					},
+				notif = self.finality_stream.next() => {
+					// TODO try accessing last of finality stream (possibly skipping some block)
+					if let Some(notif) = notif {
+						self.check_session_change(notif);
+					} else {
+						// This point is reached if the other component did shutdown.
+						debug!(target: "mixnet", "Mixnet, shutdown.");
+						return;
+					}
+				},
+				command = self.command_stream.next() => {
+					if let Some(command) = command {
+						self.handle_command(command);
+					} else {
+						// This point is reached if the other component did shutdown.
+						// Shutdown as well.
+						debug!(target: "mixnet", "Mixnet, shutdown.");
+						return;
+					}
+				},
 				event = future::poll_fn(|cx| self.worker.poll(cx)).fuse() => {
 					match event {
-						MixnetEvent::Message(message) =>
-				match message.kind {
-					mixnet::MessageType::FromSurbs(query, recipient) => {
-						trace!(target: "mixnet", "Got surb reply for {:?}", query);
+						MixnetEvent::Message(message) => match message.kind {
+							mixnet::MessageType::FromSurbs(query, recipient) => {
+								trace!(target: "mixnet", "Got surb reply for {:?}", query);
 
-						let result = MixnetImportResult::decode(&mut message.message.as_ref());
-						// Currently we only log reply for mixnet surb, could be send to
-						// some client ws in the future.
-						info!(target: "mixnet", "Received from {:?}, surb {:?}", recipient, result);
-					},
-					kind => {
-						trace!(target: "mixnet", "Received query.");
-						let reply = if kind.with_surb() {
-							Some(self.command_sender.clone())
-						} else {
-							None
-						};
+								let result = MixnetImportResult::decode(&mut message.message.as_ref());
+								// Currently we only log reply for mixnet surb, could be send to
+								// some client ws in the future.
+								info!(target: "mixnet", "Received from {:?}, surb {:?}", recipient, result);
+							},
+							kind => {
+								trace!(target: "mixnet", "Received query.");
+								let reply = if kind.with_surb() {
+									Some(self.command_sender.clone())
+								} else {
+									None
+								};
 
-					info!(target: "mixnet", "Inject transaction from mixnet, tx: {:?}",  message.message);
-					self.tx_handler_controller.inject_transaction_mixnet(kind, message.message, reply);
+								info!(target: "mixnet", "Inject transaction from mixnet, tx: {:?}",  message.message);
+								self.tx_handler_controller.inject_transaction_mixnet(kind, message.message, reply);
+							},
 						},
-				},
 						MixnetEvent::Connected(_, _) => {
 						},
 						MixnetEvent::Disconnected(disco) => {
 							for (net_id, mix_id, try_reco) in disco {
 								if try_reco {
-					if let Some(mix_id) = mix_id {
-						self.try_reco(
-							mix_id,
-							Some(net_id),
-						);
-					}
+									if let Some(mix_id) = mix_id {
+										self.try_reco(
+											mix_id,
+											Some(net_id),
+										);
+									}
 								}
 							}
 						},
 						MixnetEvent::TryConnect(try_co) => {
 							for (mix_id, net_id) in try_co {
-						self.try_reco(
-							mix_id,
-							net_id,
-						);
+								self.try_reco(
+									mix_id,
+									net_id,
+								);
 							}
 						},
 						MixnetEvent::None => (),
