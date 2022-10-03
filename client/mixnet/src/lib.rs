@@ -37,16 +37,16 @@ use sp_keystore::SyncCryptoStore;
 
 use codec::{Decode, Encode};
 use futures::{channel::oneshot, future, FutureExt, StreamExt};
-use futures_timer::Delay;
 use log::{debug, error, info, trace, warn};
 use metrics::{PacketsKind, PacketsResult};
+use mixnet::NetworkId;
 use prometheus_endpoint::Registry as PrometheusRegistry;
 use sc_client_api::{BlockchainEvents, FinalityNotification, UsageProvider};
-use sc_network::PeerId as NetworkId; // TODO from mixnet and remove sc_network dep
 use sc_network_common::{service::NetworkPeers, MixnetCommand, MixnetImportResult};
 
 use sc_utils::mpsc::tracing_unbounded;
 use sp_api::ProvideRuntimeApi;
+use sp_consensus::SyncOracle;
 use sp_core::crypto::CryptoTypePublicPair;
 pub use sp_finality_grandpa::{AuthorityId, AuthorityList, SetId};
 use sp_runtime::traits::{Block as BlockT, Header, NumberFor};
@@ -55,7 +55,6 @@ use std::{
 	collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
 	pin::Pin,
 	sync::Arc,
-	time::Duration,
 };
 
 const DEFAULT_NUM_HOPS: u32 = 4;
@@ -65,18 +64,14 @@ const COMMAND_BUFFER_SIZE: usize = 25;
 
 /// Number of blocks before seen as synched
 /// (do not turn mixnet off every time we are a few block late).
-const UNSYNCH_FINALIZED_MARGIN: u32 = 10;
-
-/// Delay in seconds after which if no finalization occurs,
-/// we switch back to synching state.
-const DELAY_NO_FINALISATION_S: u64 = 60;
+const UNSYNCH_FINALIZED_MARGIN: usize = 10;
 
 /// NetworkProvider provides [`Worker`] with all necessary hooks into the
 /// underlying Substrate networking. Using this trait abstraction instead of
 /// `sc_network::NetworkService` directly is necessary to unit test [`Worker`].
-pub trait NetworkProvider: NetworkPeers {}
+pub trait NetworkProvider: NetworkPeers + SyncOracle {}
 
-impl<T> NetworkProvider for T where T: NetworkPeers {}
+impl<T> NetworkProvider for T where T: NetworkPeers + SyncOracle {}
 
 struct TopoConfig;
 
@@ -114,6 +109,8 @@ pub struct MixnetWorker<B: BlockT, C, N> {
 	session: Option<u64>,
 	client: Arc<C>,
 	state: State,
+	// Do not shut mixnet immediatly if synching.
+	synching_margin: usize,
 	// External command.
 	command_sender: futures::channel::mpsc::Sender<MixnetCommand>,
 	command_stream: futures::channel::mpsc::Receiver<MixnetCommand>,
@@ -123,6 +120,8 @@ pub struct MixnetWorker<B: BlockT, C, N> {
 	key_store: Arc<dyn SyncCryptoStore>,
 	network: Arc<N>,
 	tx_handler_controller: TransactionsHandlerController<<B as BlockT>::Hash>,
+	// For test we don't wait on finalize: TODO this should not be needed: test and remove.
+	force_test_authority: bool,
 }
 
 type WorkerChannels = (
@@ -131,7 +130,7 @@ type WorkerChannels = (
 	futures::channel::mpsc::Sender<MixnetCommand>,
 );
 
-type AuthorityRx = oneshot::Receiver<Option<HashSet<sc_network::Multiaddr>>>;
+type AuthorityRx = oneshot::Receiver<Option<HashSet<libp2p::Multiaddr>>>;
 
 #[derive(PartialEq, Eq)]
 enum State {
@@ -251,6 +250,7 @@ where
 			session: None,
 			client,
 			state,
+			synching_margin: 0,
 			authority_discovery_service,
 			command_sender: inner_channels.2,
 			command_stream: inner_channels.1,
@@ -259,6 +259,7 @@ where
 			authority_replies: VecDeque::new(),
 			network,
 			tx_handler_controller,
+			force_test_authority: true,
 		})
 	}
 
@@ -298,14 +299,11 @@ where
 	}
 
 	pub async fn run(mut self) {
-		let info = self.client.usage_info().chain;
-		if info.finalized_number == 0u32.into() {
+		if self.force_test_authority {
 			let authority_set = self.shared_authority_set.current_authority_list();
 			let session = self.shared_authority_set.set_id();
-			self.handle_new_authority(authority_set, session, info.finalized_number);
+			self.handle_new_authority(authority_set, session, 0u32.into());
 		}
-		let mut delay_finalized = Delay::new(Duration::from_secs(DELAY_NO_FINALISATION_S));
-		let delay_finalized = &mut delay_finalized;
 		loop {
 			let mut pop_auth_query = false;
 			let mut err_auth_query = false;
@@ -341,8 +339,7 @@ where
 					notif = self.finality_stream.next() => {
 						// TODO try accessing last of finality stream (possibly skipping some block)
 						if let Some(notif) = notif {
-							delay_finalized.reset(Duration::from_secs(DELAY_NO_FINALISATION_S));
-							self.handle_new_finalize_block(notif);
+							self.check_session_change(notif);
 						} else {
 							// This point is reached if the other component did shutdown.
 							debug!(target: "mixnet", "Mixnet, shutdown.");
@@ -412,10 +409,6 @@ where
 						},
 					}
 				},
-					_ = delay_finalized.fuse() => {
-						self.state = State::Synching;
-						delay_finalized.reset(Duration::from_secs(DELAY_NO_FINALISATION_S));
-					},
 			}
 			if pop_auth_query {
 				self.authority_queries.pop_front();
@@ -495,19 +488,15 @@ where
 		self.state == State::Running
 	}
 
-	fn handle_new_finalize_block(&mut self, notif: FinalityNotification<B>) {
-		let info = self.client.usage_info().chain; // these could be part of finality stream info?
-		let best_finalized = info.finalized_number;
-		let basis = if best_finalized > UNSYNCH_FINALIZED_MARGIN.into() {
-			best_finalized - UNSYNCH_FINALIZED_MARGIN.into()
+	fn check_session_change(&mut self, notif: FinalityNotification<B>) {
+		if self.network.is_major_syncing() {
+			self.synching_margin += 1;
+			if self.synching_margin >= UNSYNCH_FINALIZED_MARGIN {
+				debug!(target: "mixnet", "Synching, mixnet suspended.");
+				self.state = State::Synching;
+			}
 		} else {
-			0u32.into()
-		};
-		if notif.header.number() < &basis {
-			debug!(target: "mixnet", "Synching, mixnet suspended {:?}.", (notif.header.number(), &basis));
-			self.state = State::Synching;
-			return
-		} else {
+			self.synching_margin = 0;
 			self.update_state(true);
 		}
 
