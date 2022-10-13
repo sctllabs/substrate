@@ -92,6 +92,10 @@ impl TopoConfigT for TopoConfig {
 
 	const DEFAULT_PARAMETERS: TopoParams =
 		TopoParams { max_external: Some(10), number_consumer_connection: Some(1) };
+
+	const NUMBER_LAYER: u8 = 1;
+
+	const MIN_LAYER_SIZE: usize = 3; // 5? as low mixnet?
 }
 use sc_network_transactions::TransactionsHandlerController;
 
