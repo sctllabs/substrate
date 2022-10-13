@@ -27,7 +27,7 @@ use mixnet::{
 		hash_table::{Configuration as TopoConfigT, Parameters as TopoParams, TopologyHashTable},
 		NewRoutingSet, ShouldConnectTo, Topology,
 	},
-	Error, MixPublicKey, MixnetEvent, MixnetId, PeerCount, SendOptions,
+	Error, MixPublicKey, MixnetEvent, MixnetId, PeerCount,
 };
 
 use ambassador::Delegate;
