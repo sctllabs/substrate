@@ -519,6 +519,10 @@ where
 			},
 			MixnetCommand::SendTransaction(message, send_options, reply) =>
 				if self.is_ready() {
+					let current_local_id = *self.worker.mixnet().local_id();
+					if !self.worker.mixnet_mut().topology.can_route(&current_local_id) {
+						unimplemented!("External node TODO try sending message to a connected authority, TODO need some way to send it");
+					}
 					match self.worker.mixnet_mut().register_message(
 						None,
 						None,
@@ -790,7 +794,6 @@ impl AuthorityTopology {
 			// MixnetId is ImOnline key.
 			local_id,
 			node_public_key,
-			config,
 			TopoConfig::DEFAULT_PARAMETERS.clone(),
 			(),
 		);
@@ -822,16 +825,6 @@ impl AuthorityTopology {
 					metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::Receiving as usize]
 				])
 				.set(stats.nb_connected_receive_routing as u64);
-			m.current_connected
-				.with_label_values(&[
-					metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::External as usize]
-				])
-				.set(stats.nb_connected_external as u64);
-			m.current_connected
-				.with_label_values(&[
-					metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::Consumer as usize]
-				])
-				.set(stats.nb_connected_consumer as u64);
 			m.current_connected
 				.with_label_values(&[
 					metrics::LABEL_NODE_STATUS[metrics::ConnectedNodeStatus::Handshakes as usize]
@@ -893,18 +886,6 @@ impl mixnet::traits::Configuration for AuthorityTopology {
 				PacketsResult::Failure,
 			);
 			metrics.set_window_packets(
-				stats.number_from_external_received_valid,
-				nb_window,
-				PacketsKind::ReceivedExternal,
-				PacketsResult::Success,
-			);
-			metrics.set_window_packets(
-				stats.number_from_external_received_invalid,
-				nb_window,
-				PacketsKind::ReceivedExternal,
-				PacketsResult::Failure,
-			);
-			metrics.set_window_packets(
 				stats.sum_connected.number_forwarded_success,
 				nb_window,
 				PacketsKind::Forward,
@@ -914,18 +895,6 @@ impl mixnet::traits::Configuration for AuthorityTopology {
 				stats.sum_connected.number_forwarded_failed,
 				nb_window,
 				PacketsKind::Forward,
-				PacketsResult::Failure,
-			);
-			metrics.set_window_packets(
-				stats.sum_connected.number_from_external_forwarded_success,
-				nb_window,
-				PacketsKind::ForwardExternal,
-				PacketsResult::Success,
-			);
-			metrics.set_window_packets(
-				stats.sum_connected.number_from_external_forwarded_failed,
-				nb_window,
-				PacketsKind::ForwardExternal,
 				PacketsResult::Failure,
 			);
 			metrics.set_window_packets(
@@ -1066,9 +1035,7 @@ mod metrics {
 		Total = 0,
 		Forwarding = 1,
 		Receiving = 2,
-		External = 3,
-		Consumer = 4,
-		Handshakes = 5,
+		Handshakes = 3,
 	}
 
 	pub const LABEL_NODE_STATUS: &[&str] =
