@@ -26,6 +26,8 @@ sp-runtime-interface = { version = "7.0.0", default-features = false, path = "..
 sp-trie = { version = "7.0.0", default-features = false, optional = true, path = "../trie" }
 sp-externalities = { version = "0.13.0", default-features = false, path = "../externalities" }
 sp-tracing = { version = "6.0.0", default-features = false, path = "../tracing" }
+sp-mixnet-externalities-ext = { version = "0.1.0-dev", default-features = false, path = "../mixnet/externalities-ext" }
+sp-mixnet-types = { version = "0.1.0-dev", default-features = false, path = "../mixnet/types" }
 log = { version = "0.4.17", optional = true }
 futures = { version = "0.3.21", features = ["thread-pool"], optional = true }
 secp256k1 = { version = "0.24.0", features = ["recovery", "global-context"], optional = true }
@@ -52,6 +54,8 @@ std = [
 	"secp256k1",
 	"sp-runtime-interface/std",
 	"sp-tracing/std",
+    "sp-mixnet-externalities-ext/std",
+    "sp-mixnet-types/std",
 	"tracing/std",
 	"tracing-core/std",
 	"log",

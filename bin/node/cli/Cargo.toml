@@ -88,6 +88,7 @@ pallet-transaction-payment = { version = "4.0.0-dev", path = "../../../frame/tra
 pallet-assets = { version = "4.0.0-dev", path = "../../../frame/assets/" }
 pallet-asset-tx-payment = { version = "4.0.0-dev", path = "../../../frame/transaction-payment/asset-tx-payment/" }
 pallet-im-online = { version = "4.0.0-dev", default-features = false, path = "../../../frame/im-online" }
+pallet-mixnet = { version = "0.1.0-dev", path = "../../../frame/mixnet" }
 
 # node-specific dependencies
 kitchensink-runtime = { version = "3.0.0-dev", path = "../runtime" }
