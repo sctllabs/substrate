@@ -46,7 +46,16 @@ pub mod pallet {
 	pub trait Config: frame_system::Config + pallet_session::Config {
 		/// The maximum number of authorities that can be added.
 		type MaxAuthorities: Get<u32>;
+
+        /// Remember the authorities of the previous session and return them from `authorities()`?
+        type TrackPrevAuthorities: Get<bool>;
 	}
+
+	#[pallet::storage]
+	#[pallet::getter(fn prev_keys)]
+    /// Keys of the previous authority set. Only used if `TrackPrevAuthorities` is true.
+	pub(super) type PrevKeys<T: Config> =
+		StorageValue<_, WeakBoundedVec<AuthorityId, T::MaxAuthorities>, ValueQuery>;
 
 	#[pallet::storage]
 	#[pallet::getter(fn keys)]
@@ -75,18 +84,31 @@ pub mod pallet {
 }
 
 impl<T: Config> Pallet<T> {
-	/// Retrieve authority identifiers of the current and next authority set
-	/// sorted and deduplicated.
+    /// Retrieve authority identifiers of the previous, current, and next authority set sorted and
+    /// deduplicated. Identifiers of the previous authority set will only be included if
+    /// `TrackPrevAuthorities` is true.
 	pub fn authorities() -> Vec<AuthorityId> {
 		let mut keys = Keys::<T>::get().to_vec();
-		let next = NextKeys::<T>::get().to_vec();
 
+        if T::TrackPrevAuthorities::get() {
+            let prev = PrevKeys::<T>::get().to_vec();
+            keys.extend(prev);
+        }
+
+		let next = NextKeys::<T>::get().to_vec();
 		keys.extend(next);
+
 		keys.sort();
 		keys.dedup();
 
 		keys.to_vec()
 	}
+
+    /// Retrieve authority identifiers of the previous authority set in the original order. Note
+    /// that if `TrackPrevAuthorities` is false this will always return an empty vec.
+    pub fn prev_authorities() -> WeakBoundedVec<AuthorityId, T::MaxAuthorities> {
+        PrevKeys::<T>::get()
+    }
 
 	/// Retrieve authority identifiers of the current authority set in the original order.
 	pub fn current_authorities() -> WeakBoundedVec<AuthorityId, T::MaxAuthorities> {
@@ -130,6 +152,12 @@ impl<T: Config> OneSessionHandler<T::AccountId> for Pallet<T> {
 	where
 		I: Iterator<Item = (&'a T::AccountId, Self::Key)>,
 	{
+        // Note that changed applies to validators/queued_validators, we can't use it to skip
+        // updating PrevKeys
+        if T::TrackPrevAuthorities::get() {
+            PrevKeys::<T>::put(Keys::<T>::get())
+        }
+
 		// Remember who the authorities are for the new and next session.
 		if changed {
 			let keys = validators.map(|x| x.1).collect::<Vec<_>>();
@@ -202,6 +230,7 @@ mod tests {
 
 	impl Config for Test {
 		type MaxAuthorities = ConstU32<100>;
+        type TrackPrevAuthorities = ConstBool<false>;
 	}
 
 	impl pallet_session::Config for Test {

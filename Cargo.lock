@@ -3498,6 +3498,7 @@ dependencies = [
  "pallet-indices",
  "pallet-lottery",
  "pallet-membership",
+ "pallet-mixnet",
  "pallet-mmr",
  "pallet-multisig",
  "pallet-nomination-pools",
@@ -4850,6 +4851,7 @@ dependencies = [
  "pallet-asset-tx-payment",
  "pallet-balances",
  "pallet-im-online",
+ "pallet-mixnet",
  "pallet-timestamp",
  "pallet-transaction-payment",
  "parity-scale-codec",
@@ -6030,6 +6032,26 @@ dependencies = [
  "sp-core",
  "sp-io",
  "sp-runtime",
+ "sp-std",
+]
+
+[[package]]
+name = "pallet-mixnet"
+version = "0.1.0-dev"
+dependencies = [
+ "arrayref",
+ "frame-benchmarking",
+ "frame-support",
+ "frame-system",
+ "log",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-application-crypto",
+ "sp-arithmetic",
+ "sp-io",
+ "sp-mixnet-types",
+ "sp-runtime",
+ "sp-session",
  "sp-std",
 ]
 
@@ -10157,6 +10179,8 @@ dependencies = [
  "sp-core",
  "sp-externalities",
  "sp-keystore",
+ "sp-mixnet-externalities-ext",
+ "sp-mixnet-types",
  "sp-runtime-interface",
  "sp-state-machine",
  "sp-std",
@@ -10203,6 +10227,23 @@ version = "4.1.0-dev"
 dependencies = [
  "thiserror",
  "zstd",
+]
+
+[[package]]
+name = "sp-mixnet-externalities-ext"
+version = "0.1.0-dev"
+dependencies = [
+ "sp-externalities",
+ "sp-mixnet-types",
+]
+
+[[package]]
+name = "sp-mixnet-types"
+version = "0.1.0-dev"
+dependencies = [
+ "parity-scale-codec",
+ "serde",
+ "sp-std",
 ]
 
 [[package]]

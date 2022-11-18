@@ -57,6 +57,9 @@ use sp_core::{
 };
 
 #[cfg(feature = "std")]
+use sp_mixnet_externalities_ext::MixnetExt;
+
+#[cfg(feature = "std")]
 use sp_trie::{LayoutV0, LayoutV1, TrieConfiguration};
 
 use sp_runtime_interface::{
@@ -1374,6 +1377,20 @@ pub trait Offchain {
 	}
 }
 
+/// Interface for querying the local mixnet node.
+#[runtime_interface]
+pub trait Mixnet {
+    /// Get the key-exchange public key for the local node in the specified session. Note that
+    /// `session_index` should really be an `sp_session::SessionIndex`; it is a `u32` to avoid
+    /// circular crate dependencies.
+    fn kx_public_for_session(&mut self, session_index: u32) ->
+        Result<sp_mixnet_types::KxPublic, sp_mixnet_types::KxPublicForSessionError> {
+        self.extension::<MixnetExt>()
+            .expect("No mixnet associated with the current context!")
+            .kx_public_for_session(session_index)
+    }
+}
+
 /// Wasm only interface that provides functions for calling into the allocator.
 #[runtime_interface(wasm_only)]
 pub trait Allocator {
@@ -1769,6 +1786,7 @@ pub type SubstrateHostFunctions = (
 	offchain_index::HostFunctions,
 	runtime_tasks::HostFunctions,
 	transaction_index::HostFunctions,
+    mixnet::HostFunctions,
 );
 
 #[cfg(test)]

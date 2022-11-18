@@ -32,7 +32,7 @@ use frame_support::{
 	pallet_prelude::Get,
 	parameter_types,
 	traits::{
-		AsEnsureOriginWithArg, ConstU128, ConstU16, ConstU32, Currency, EitherOfDiverse,
+		AsEnsureOriginWithArg, ConstBool, ConstU128, ConstU16, ConstU32, Currency, EitherOfDiverse,
 		EqualPrivilegeOnly, Everything, Imbalance, InstanceFilter, KeyOwnerProofSystem,
 		LockIdentifier, Nothing, OnUnbalanced, U128CurrencyToVote,
 	},
@@ -499,6 +499,7 @@ impl_opaque_keys! {
 		pub babe: Babe,
 		pub im_online: ImOnline,
 		pub authority_discovery: AuthorityDiscovery,
+        pub mixnet: Mixnet,
 	}
 }
 
@@ -936,7 +937,7 @@ impl pallet_democracy::Config for Runtime {
 		pallet_collective::EnsureProportionAtLeast<AccountId, TechnicalCollective, 2, 3>;
 	type InstantOrigin =
 		pallet_collective::EnsureProportionAtLeast<AccountId, TechnicalCollective, 1, 1>;
-	type InstantAllowed = frame_support::traits::ConstBool<true>;
+	type InstantAllowed = ConstBool<true>;
 	type FastTrackVotingPeriod = FastTrackVotingPeriod;
 	// To cancel a proposal which has been passed, 2/3 of the council must agree to it.
 	type CancellationOrigin =
@@ -1192,6 +1193,7 @@ parameter_types! {
 	pub const ImOnlineUnsignedPriority: TransactionPriority = TransactionPriority::max_value();
 	/// We prioritize im-online heartbeats over election solution submission.
 	pub const StakingUnsignedPriority: TransactionPriority = TransactionPriority::max_value() / 2;
+    pub const MixnetUnsignedPriority: TransactionPriority = TransactionPriority::max_value() / 3;
 	pub const MaxAuthorities: u32 = 100;
 	pub const MaxKeys: u32 = 10_000;
 	pub const MaxPeerInHeartbeats: u32 = 10_000;
@@ -1274,6 +1276,7 @@ impl pallet_offences::Config for Runtime {
 
 impl pallet_authority_discovery::Config for Runtime {
 	type MaxAuthorities = MaxAuthorities;
+    type TrackPrevAuthorities = ConstBool<true>;
 }
 
 impl pallet_grandpa::Config for Runtime {
@@ -1604,6 +1607,13 @@ impl pallet_alliance::Config for Runtime {
 	type RetirementPeriod = RetirementPeriod;
 }
 
+impl pallet_mixnet::Config for Runtime {
+	type MaxAuthorities = MaxAuthorities;
+    type ValidatorSet = Historical;
+    type NextSessionRotation = Babe;
+    type RegistrationPriority = MixnetUnsignedPriority;
+}
+
 construct_runtime!(
 	pub enum Runtime where
 		Block = Block,
@@ -1667,6 +1677,7 @@ construct_runtime!(
 		RankedPolls: pallet_referenda::<Instance2>,
 		RankedCollective: pallet_ranked_collective,
 		FastUnstake: pallet_fast_unstake,
+        Mixnet: pallet_mixnet,
 	}
 );
 
@@ -2126,6 +2137,7 @@ impl_runtime_apis! {
 				node_keys.push((key_types::BABE, key_set.babe.to_public_crypto_pair()));
 				node_keys.push((key_types::IM_ONLINE, key_set.im_online.to_public_crypto_pair()));
 				node_keys.push((key_types::AUTHORITY_DISCOVERY, key_set.authority_discovery.to_public_crypto_pair()));
+                node_keys.push((key_types::MIXNET, key_set.mixnet.to_public_crypto_pair()));
 				let node_id: &[u8] = node_id.as_ref();
 				keys.push((node_id.to_vec(), node_keys));
 			}

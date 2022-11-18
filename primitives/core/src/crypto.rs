@@ -1116,6 +1116,8 @@ pub mod key_types {
 	pub const AUTHORITY_DISCOVERY: KeyTypeId = KeyTypeId(*b"audi");
 	/// Key type for staking, built-in. Identified as `stak`.
 	pub const STAKING: KeyTypeId = KeyTypeId(*b"stak");
+    /// Key type for Mixnet module, used to sign key-exchange public keys. Identified as `mixn`.
+    pub const MIXNET: KeyTypeId = KeyTypeId(*b"mixn");
 	/// A key type ID useful for tests.
 	pub const DUMMY: KeyTypeId = KeyTypeId(*b"dumy");
 }
