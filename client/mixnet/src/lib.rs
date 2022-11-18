@@ -48,7 +48,7 @@ use sc_utils::mpsc::tracing_unbounded;
 use sp_api::ProvideRuntimeApi;
 use sp_consensus::SyncOracle;
 use sp_core::crypto::CryptoTypePublicPair;
-pub use sp_finality_grandpa::{AuthorityId, AuthorityList, SetId};
+pub use sp_finality_grandpa::{AuthorityId as GrandpaId, AuthorityList, SetId};
 use sp_runtime::traits::{Block as BlockT, Header, NumberFor};
 use sp_session::CurrentSessionKeys;
 use std::{
@@ -102,7 +102,7 @@ use sc_network_transactions::TransactionsHandlerController;
 /// Mixnet running worker.
 pub struct MixnetWorker<B: BlockT, C, N> {
 	// current node authority_id if validating.
-	authority_id: Option<AuthorityId>,
+	authority_id: Option<GrandpaId>,
 	worker: mixnet::MixnetWorker<AuthorityTopology>,
 	// Finality notification stream, for each new final block
 	// we look for an authority set update.
@@ -720,7 +720,7 @@ where
 				.collect::<HashSet<_>>();
 
 		for authority in set.iter() {
-			let auth_id: AuthorityId = authority.0.clone().into();
+			let auth_id: GrandpaId = authority.0.clone().into();
 			if local_pub_keys.contains(&auth_id.clone().into()) {
 				debug!("found self in authority set, will route");
 				self.authority_id = Some(auth_id);
@@ -776,7 +776,7 @@ pub struct AuthorityTopology {
 
 #[derive(Clone)]
 pub struct AuthorityInfo {
-	pub grandpa_id: AuthorityId,
+	pub grandpa_id: GrandpaId,
 	pub authority_discovery_id: CryptoTypePublicPair,
 }
 
