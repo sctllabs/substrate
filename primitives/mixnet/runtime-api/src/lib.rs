@@ -24,27 +24,27 @@ use sp_mixnet_types::Node;
 use sp_session::SessionIndex;
 
 sp_api::decl_runtime_apis! {
-    pub trait MixnetApi {
-        /// Get the index of the current session.
-        fn current_session_index() -> SessionIndex;
+	pub trait MixnetApi {
+		/// Get the index of the current session.
+		fn current_session_index() -> SessionIndex;
 
-        /// Get the authority discovery IDs for the previous session, in the original order (ie
-        /// indexable by `AuthorityIndex`).
-        fn prev_authority_discovery_ids() -> Vec<AuthorityDiscoveryId>;
+		/// Get the authority discovery IDs for the previous session, in the original order (ie
+		/// indexable by `AuthorityIndex`).
+		fn prev_authority_discovery_ids() -> Vec<AuthorityDiscoveryId>;
 
-        /// Get the authority discovery IDs for the current session, in the original order (ie
-        /// indexable by `AuthorityIndex`).
-        fn current_authority_discovery_ids() -> Vec<AuthorityDiscoveryId>;
+		/// Get the authority discovery IDs for the current session, in the original order (ie
+		/// indexable by `AuthorityIndex`).
+		fn current_authority_discovery_ids() -> Vec<AuthorityDiscoveryId>;
 
-        /// Get the authority discovery IDs for the next session, in the original order (ie
-        /// indexable by `AuthorityIndex`).
-        fn next_authority_discovery_ids() -> Vec<AuthorityDiscoveryId>;
+		/// Get the authority discovery IDs for the next session, in the original order (ie
+		/// indexable by `AuthorityIndex`).
+		fn next_authority_discovery_ids() -> Vec<AuthorityDiscoveryId>;
 
-        /// Get the mixnet node set for the current session. Message senders should always use this
-        /// when sending messages. Mixnet nodes however should accept/forward messages constructed
-        /// using the previous, current, or next node set. This is to allow for senders/nodes
-        /// switching sessions at slightly different times, and for messages taking some time to
-        /// traverse the mixnet.
-        fn current_nodes() -> Vec<Node>;
-    }
+		/// Get the mixnet node set for the current session. Message senders should always use this
+		/// when sending messages. Mixnet nodes however should accept/forward messages constructed
+		/// using the previous, current, or next node set. This is to allow for senders/nodes
+		/// switching sessions at slightly different times, and for messages taking some time to
+		/// traverse the mixnet.
+		fn current_nodes() -> Vec<Node>;
+	}
 }

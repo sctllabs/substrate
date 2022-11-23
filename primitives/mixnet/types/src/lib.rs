@@ -34,24 +34,25 @@ pub type KxPublic = [u8; 32];
 #[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
 /// Mixnet node information needed by message senders.
 pub struct Node {
-    /// Index of node in authority list. The session is implied by `kx_public`.
-    pub index: AuthorityIndex,
-    /// Key-exchange public key for the node.
-    pub kx_public: KxPublic
+	/// Index of node in authority list. The session is implied by `kx_public`.
+	pub index: AuthorityIndex,
+	/// Key-exchange public key for the node.
+	pub kx_public: KxPublic,
 }
 
 #[derive(Decode, Encode)]
 /// Errors that may be returned by `kx_public_for_session`.
 pub enum KxPublicForSessionError {
-    /// The key for this session was discarded already.
-    Discarded
+	/// The key for this session was discarded already.
+	Discarded,
 }
 
 impl sp_std::fmt::Debug for KxPublicForSessionError {
-    fn fmt(&self, fmt: &mut sp_std::fmt::Formatter) -> sp_std::fmt::Result {
-        match self {
-            KxPublicForSessionError::Discarded =>
-                write!(fmt, "The key pair was discarded as it was too old.")
-        }
-    }
+	fn fmt(&self, fmt: &mut sp_std::fmt::Formatter) -> sp_std::fmt::Result {
+		match self {
+			KxPublicForSessionError::Discarded => {
+				write!(fmt, "The key pair was discarded as it was too old.")
+			},
+		}
+	}
 }
