@@ -170,6 +170,27 @@ pub fn expand_hooks(def: &mut Def) -> proc_macro2::TokenStream {
 
 			#[cfg(feature = "try-runtime")]
 			fn post_upgrade(state: #frame_support::sp_std::vec::Vec<u8>) -> Result<(), &'static str> {
+				let on_chain_version = <Self as #frame_support::traits::GetStorageVersion>::on_chain_storage_version();
+				let current_version = <Self as #frame_support::traits::GetStorageVersion>::current_storage_version();
+
+				if on_chain_version != current_version {
+					let pallet_name = <
+						<T as #frame_system::Config>::PalletInfo
+						as
+						#frame_support::traits::PalletInfo
+					>::name::<Self>().unwrap_or("<unknown pallet name>");
+
+					#frame_support::log::error!(
+						target: #frame_support::LOG_TARGET,
+						"{}: On chain storage version {} doesn't match current storage version {}.",
+						pallet_name,
+						on_chain_version,
+						current_version,
+					);
+
+					return Err("On chain and current storage version do not match. Missing runtime upgrade?");
+				}
+
 				<
 					Self
 					as

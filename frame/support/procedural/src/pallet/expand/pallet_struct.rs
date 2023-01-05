@@ -163,7 +163,31 @@ pub fn expand_pallet_struct(def: &mut Def) -> proc_macro2::TokenStream {
 	let storage_version = if let Some(v) = def.pallet_struct.storage_version.as_ref() {
 		quote::quote! { #v }
 	} else {
-		quote::quote! { #frame_support::traits::StorageVersion::default() }
+		quote::quote! {
+			let pallet_name = <
+				<T as #frame_system::Config>::PalletInfo
+				as
+				#frame_support::traits::PalletInfo
+			>::name::<Self>().unwrap_or("<unknown pallet name>");
+
+			#frame_support::log::error!(
+				target: #frame_support::LOG_TARGET,
+				"{}: On chain storage version {} doesn't match current storage version {}.",
+				pallet_name,
+				on_chain_version,
+				current_version,
+			);
+
+			#frame_support::traits::StorageVersion::default()
+		}
+	};
+
+	let genesis_storage_version = if let Some(v) = def.pallet_struct.storage_version.as_ref() {
+		quote::quote! { #v }
+	} else {
+		quote::quote! {
+			#frame_support::traits::StorageVersion::default()
+		}
 	};
 
 	let whitelisted_storage_idents: Vec<syn::Ident> = def
@@ -214,7 +238,7 @@ pub fn expand_pallet_struct(def: &mut Def) -> proc_macro2::TokenStream {
 			#config_where_clause
 		{
 			fn on_genesis() {
-				let storage_version = #storage_version;
+				let storage_version = #genesis_storage_version;
 				storage_version.put::<Self>();
 			}
 		}
