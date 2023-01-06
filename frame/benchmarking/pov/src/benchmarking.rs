@@ -46,6 +46,42 @@ frame_benchmarking::benchmarks! {
 		assert_eq!(Value::<T>::get(), Some(123));
 	}
 
+	storage_single_value_write_twice {
+	}: {
+		Value::<T>::put(123);
+		Value::<T>::put(123);
+	} verify {
+		assert_eq!(Value::<T>::get(), Some(123));
+	}
+
+	storage_single_value_read_and_write {
+	}: {
+		Value::<T>::get();
+		Value::<T>::put(123);
+		// free
+		Value::<T>::get();
+		Value::<T>::get();
+		Value::<T>::put(123);
+		Value::<T>::get();
+		Value::<T>::put(123);
+	} verify {
+		assert_eq!(Value::<T>::get(), Some(123));
+	}
+
+	storage_single_value_write_and_read {
+	}: {
+		Value::<T>::put(123);
+		Value::<T>::get();
+		// free
+		Value::<T>::get();
+		Value::<T>::get();
+		Value::<T>::put(123);
+		Value::<T>::get();
+		Value::<T>::put(123);
+	} verify {
+		assert_eq!(Value::<T>::get(), Some(123));
+	}
+
 	storage_single_value_kill {
 		Value::<T>::put(123);
 	}: {
