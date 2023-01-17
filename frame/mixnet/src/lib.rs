@@ -26,7 +26,7 @@ use scale_info::TypeInfo;
 use sp_application_crypto::RuntimeAppPublic;
 use sp_arithmetic::{per_things::Permill, traits::AtLeast32BitUnsigned};
 use sp_io::MultiRemovalResults;
-use sp_mixnet_types::{AuthorityIndex, KxPublic, KxPublicForSessionError, Node};
+use sp_mixnet_types::{AuthorityIndex, KxPublic, KxPublicForSessionErr, Mixnode};
 use sp_runtime::{
 	offchain::storage::{MutateStorageError, StorageRetrievalError, StorageValueRef},
 	RuntimeDebug,
@@ -49,11 +49,10 @@ pub struct Registration<BlockNumber> {
 	/// different hash in case the earlier transaction got banned somewhere; including the block
 	/// number is a simple way of achieving this.
 	pub block_number: BlockNumber,
-	/// The session during which this registration should be processed. Note that on success the
-	/// node is registered as part of the mixnet node set for the _following_ session.
+    /// The session during which this registration should be processed. Note that on success the
+    /// node is registered as part of the mixnode set for the _following_ session.
 	pub session_index: SessionIndex,
-	/// The index in the next session's authority list of the authority registering as a mixnet
-	/// node.
+    /// The index in the next session's authority list of the authority registering as a mixnode.
 	pub authority_index: AuthorityIndex,
 	/// The key-exchange public key to be used during the following session.
 	pub kx_public: KxPublic,
@@ -93,7 +92,7 @@ enum OffchainErr<BlockNumber> {
 	AlreadyRegistered,
 	WaitingForInclusion(BlockNumber),
 	LostRace,
-	KxPublicForSessionFailed(KxPublicForSessionError),
+	KxPublicForSessionFailed(KxPublicForSessionErr),
 	SigningFailed,
 	SubmitFailed,
 }
@@ -108,7 +107,7 @@ impl<BlockNumber: sp_std::fmt::Debug> sp_std::fmt::Debug for OffchainErr<BlockNu
 				write!(fmt, "Already registered as a mixnet node in the next session."),
 			OffchainErr::WaitingForInclusion(block_number) => write!(
 				fmt,
-				"Registration already sent at {:?}. Waiting for inclusion.",
+				"Registration already sent at {:?}. Waiting for inclusion",
 				block_number
 			),
 			OffchainErr::LostRace => write!(fmt, "Lost a race with another offchain worker."),
@@ -146,7 +145,7 @@ pub mod pallet {
 		/// transactions.
 		type NextSessionRotation: EstimateNextSessionRotation<Self::BlockNumber>;
 
-		/// Priority of unsigned transactions used to register mixnet nodes.
+		/// Priority of unsigned transactions used to register mixnodes.
 		#[pallet::constant]
 		type RegistrationPriority: Get<TransactionPriority>;
 	}
@@ -156,22 +155,22 @@ pub mod pallet {
 	pub(crate) type NextAuthorityIds<T> = StorageMap<_, Identity, AuthorityIndex, AuthorityId>;
 
 	#[pallet::storage]
-	/// Mixnet node set. Active during even sessions (0, 2, ...). Built during odd sessions.
-	pub(crate) type EvenSessionNodes<T> = StorageMap<_, Identity, AuthorityIndex, KxPublic>;
+	/// Mixnode set. Active during even sessions (0, 2, ...). Built during odd sessions.
+	pub(crate) type EvenSessionMixnodes<T> = StorageMap<_, Identity, AuthorityIndex, KxPublic>;
 
 	#[pallet::storage]
-	/// Mixnet node set. Active during odd sessions (1, 3, ...). Built during even sessions.
-	pub(crate) type OddSessionNodes<T> = StorageMap<_, Identity, AuthorityIndex, KxPublic>;
+	/// Mixnode set. Active during odd sessions (1, 3, ...). Built during even sessions.
+	pub(crate) type OddSessionMixnodes<T> = StorageMap<_, Identity, AuthorityIndex, KxPublic>;
 
 	#[pallet::genesis_config]
 	pub struct GenesisConfig<T: Config> {
-		pub nodes: BoundedVec<Node, T::MaxAuthorities>,
+		pub mixnodes: BoundedVec<Mixnode, T::MaxAuthorities>,
 	}
 
 	#[cfg(feature = "std")]
 	impl<T: Config> Default for GenesisConfig<T> {
 		fn default() -> Self {
-			Self { nodes: Default::default() }
+			Self { mixnodes: Default::default() }
 		}
 	}
 
@@ -184,15 +183,15 @@ pub mod pallet {
 				"Session index should be 0 in genesis block"
 			);
 			assert!(
-				EvenSessionNodes::<T>::iter().next().is_none(),
-				"Initial mixnet nodes already set"
+				EvenSessionMixnodes::<T>::iter().next().is_none(),
+				"Initial mixnodes already set"
 			);
 			assert!(
-				OddSessionNodes::<T>::iter().next().is_none(),
-				"Odd session mixnet node set should be empty in genesis block"
+				OddSessionMixnodes::<T>::iter().next().is_none(),
+				"Odd session mixnode set should be empty in genesis block"
 			);
-			for node in &self.nodes {
-				EvenSessionNodes::<T>::insert(node.index, node.kx_public);
+			for mixnode in &self.mixnodes {
+				EvenSessionMixnodes::<T>::insert(mixnode.authority_index, mixnode.kx_public);
 			}
 		}
 	}
@@ -215,9 +214,9 @@ pub mod pallet {
 			// Note we are registering for the _following_ session, so the if appears to be
 			// backwards...
 			if (registration.session_index & 1) == 0 {
-				OddSessionNodes::<T>::insert(registration.authority_index, registration.kx_public);
+				OddSessionMixnodes::<T>::insert(registration.authority_index, registration.kx_public);
 			} else {
-				EvenSessionNodes::<T>::insert(registration.authority_index, registration.kx_public);
+				EvenSessionMixnodes::<T>::insert(registration.authority_index, registration.kx_public);
 			}
 
 			Ok(())
@@ -284,8 +283,7 @@ pub mod pallet {
 	#[pallet::hooks]
 	impl<T: Config> Hooks<T::BlockNumber> for Pallet<T> {
 		fn offchain_worker(block_number: T::BlockNumber) {
-			// If this node is not running as a validator, never try to register as a mixnet
-			// node...
+            // If this node is not running as a validator, never try to register as a mixnode...
 			if sp_io::offchain::is_validator() {
 				if let Err(err) = Self::maybe_register_this_node(block_number) {
 					log::debug!(target: "runtime::mixnet",
@@ -303,13 +301,13 @@ fn random_u64() -> u64 {
 }
 
 impl<T: Config> Pallet<T> {
-	pub fn current_nodes() -> Vec<Node> {
+	pub fn current_mixnodes() -> Vec<Mixnode> {
 		let iter = if (T::ValidatorSet::session_index() & 1) == 0 {
-			EvenSessionNodes::<T>::iter()
+			EvenSessionMixnodes::<T>::iter()
 		} else {
-			OddSessionNodes::<T>::iter()
+			OddSessionMixnodes::<T>::iter()
 		};
-		iter.map(|(index, kx_public)| Node { index, kx_public }).collect()
+		iter.map(|(authority_index, kx_public)| Mixnode { authority_index, kx_public }).collect()
 	}
 
 	/// Is it ok to register this node now, considering only session progress?
@@ -358,9 +356,9 @@ impl<T: Config> Pallet<T> {
 		// Note that registration is for the _following_ session, so the if appears to be
 		// backwards...
 		if (session_index & 1) == 0 {
-			OddSessionNodes::<T>::contains_key(authority_index)
+			OddSessionMixnodes::<T>::contains_key(authority_index)
 		} else {
-			EvenSessionNodes::<T>::contains_key(authority_index)
+			EvenSessionMixnodes::<T>::contains_key(authority_index)
 		}
 	}
 
@@ -424,8 +422,8 @@ impl<T: Config> Pallet<T> {
 			authority_id: authority_id.clone(),
 		};
 		Self::with_recorded_registration_attempt(attempt, || {
-			let kx_public = sp_io::mixnet::kx_public_for_session(session_index)
-				.map_err(|err| OffchainErr::KxPublicForSessionFailed(err))?;
+			let kx_public = sp_io::mixnet_kx_public_store::public_for_session(session_index)
+				.map_err(OffchainErr::KxPublicForSessionFailed)?;
 			let registration = Registration::<T::BlockNumber> {
 				block_number,
 				session_index,
@@ -469,18 +467,18 @@ impl<T: Config> OneSessionHandler<T::AccountId> for Pallet<T> {
 	where
 		I: Iterator<Item = (&'a T::AccountId, Self::Key)>,
 	{
-		// Clear node set for the _following_ session. Note that we do this even if the validator
-		// set is not going to change; the key-exchange public keys are still rotated.
+        // Clear mixnode set for the _following_ session. Note that we do this even if the
+        // validator set is not going to change; the key-exchange public keys are still rotated.
 		if (T::ValidatorSet::session_index() & 1) == 0 {
-			check_removed_all(OddSessionNodes::<T>::clear(T::MaxAuthorities::get(), None));
+			check_removed_all(OddSessionMixnodes::<T>::clear(T::MaxAuthorities::get(), None));
 		} else {
-			check_removed_all(EvenSessionNodes::<T>::clear(T::MaxAuthorities::get(), None));
+			check_removed_all(EvenSessionMixnodes::<T>::clear(T::MaxAuthorities::get(), None));
 		}
 
 		if changed {
 			// Save authority set for the next session. Note that we don't care about the authority
 			// set for the current session; we just care about the key-exchange public keys that
-			// were registered and are stored in Odd/EvenSessionNodes.
+			// were registered and are stored in Odd/EvenSessionMixnodes.
 			check_removed_all(NextAuthorityIds::<T>::clear(T::MaxAuthorities::get(), None));
 			for (i, (_, authority_id)) in queued_validators.enumerate() {
 				NextAuthorityIds::<T>::insert(i as AuthorityIndex, authority_id);

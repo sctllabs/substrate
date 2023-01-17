@@ -20,8 +20,9 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 use sp_authority_discovery::AuthorityId as AuthorityDiscoveryId;
-use sp_mixnet_types::Node;
+use sp_mixnet_types::Mixnode;
 use sp_session::SessionIndex;
+use sp_std::vec::Vec;
 
 sp_api::decl_runtime_apis! {
     pub trait MixnetApi {
@@ -40,11 +41,11 @@ sp_api::decl_runtime_apis! {
         /// indexable by `AuthorityIndex`).
         fn next_authority_discovery_ids() -> Vec<AuthorityDiscoveryId>;
 
-        /// Get the mixnet node set for the current session. Message senders should always use this
-        /// when sending messages. Mixnet nodes however should accept/forward messages constructed
-        /// using the previous, current, or next node set. This is to allow for senders/nodes
+        /// Get the mixnode set for the current session. Message senders should always use this
+        /// when sending messages. Mixnodes however should accept/forward messages constructed
+        /// using the previous, current, or next mixnode set. This is to allow for senders/mixnodes
         /// switching sessions at slightly different times, and for messages taking some time to
         /// traverse the mixnet.
-        fn current_nodes() -> Vec<Node>;
-    }
+		fn current_mixnodes() -> Vec<Mixnode>;
+	}
 }

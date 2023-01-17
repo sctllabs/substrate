@@ -904,7 +904,7 @@ where
 		protocol_config
 	}));
 
-	let (mixnet_tx, mixnet_rx) = tracing_unbounded("mpsc_system_rpc", 1_000);
+	let (mixnet_tx, mixnet_rx) = tracing_unbounded("mpsc_mixnet_message", 1_000);
 
 	let mut network_params = sc_network::config::Params {
 		role: config.role.clone(),

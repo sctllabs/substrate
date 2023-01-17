@@ -35,6 +35,8 @@ sp-core = { version = "7.0.0", default-features = false, path = "../../../primit
 sp-std = { version = "5.0.0", default-features = false, path = "../../../primitives/std" }
 sp-api = { version = "4.0.0-dev", default-features = false, path = "../../../primitives/api" }
 sp-runtime = { version = "7.0.0", default-features = false, path = "../../../primitives/runtime" }
+sp-mixnet-runtime-api = { version = "0.1.0-dev", default-features = false, path = "../../../primitives/mixnet/runtime-api" }
+sp-mixnet-types = { version = "0.1.0-dev", default-features = false, path = "../../../primitives/mixnet/types" }
 sp-staking = { version = "4.0.0-dev", default-features = false, path = "../../../primitives/staking" }
 sp-session = { version = "4.0.0-dev", default-features = false, path = "../../../primitives/session" }
 sp-transaction-pool = { version = "4.0.0-dev", default-features = false, path = "../../../primitives/transaction-pool" }
@@ -128,6 +130,8 @@ std = [
 	"frame-system-benchmarking?/std",
 	"frame-election-provider-support/std",
 	"sp-authority-discovery/std",
+	"sp-mixnet-runtime-api/std",
+	"sp-mixnet-types/std",
 	"pallet-assets/std",
 	"pallet-authority-discovery/std",
 	"pallet-authorship/std",

@@ -183,8 +183,6 @@ pub struct NetworkConfiguration {
 	pub kademlia_disjoint_query_paths: bool,
 	/// Enable serving block data over IPFS bitswap.
 	pub ipfs_server: bool,
-	/// Enable the mixnet protocol
-	pub mixnet: bool,
 
 	/// Size of Yamux receive window of all substreams. `None` for the default (256kiB).
 	/// Any value less than 256kiB is invalid.
@@ -237,7 +235,6 @@ impl NetworkConfiguration {
 			kademlia_disjoint_query_paths: false,
 			yamux_window_size: None,
 			ipfs_server: false,
-			mixnet: false,
 		}
 	}
 

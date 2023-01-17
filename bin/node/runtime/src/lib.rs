@@ -2053,6 +2053,28 @@ impl_runtime_apis! {
 		}
 	}
 
+    impl sp_mixnet_runtime_api::MixnetApi<Block> for Runtime {
+		fn current_session_index() -> sp_session::SessionIndex {
+            Session::current_index()
+        }
+
+		fn prev_authority_discovery_ids() -> Vec<AuthorityDiscoveryId> {
+            AuthorityDiscovery::prev_authorities().into_inner()
+        }
+
+		fn current_authority_discovery_ids() -> Vec<AuthorityDiscoveryId> {
+            AuthorityDiscovery::current_authorities().into_inner()
+        }
+
+		fn next_authority_discovery_ids() -> Vec<AuthorityDiscoveryId> {
+            AuthorityDiscovery::next_authorities().into_inner()
+        }
+
+		fn current_mixnodes() -> Vec<sp_mixnet_types::Mixnode> {
+            Mixnet::current_mixnodes()
+        }
+    }
+
 	impl frame_system_rpc_runtime_api::AccountNonceApi<Block, AccountId, Index> for Runtime {
 		fn account_nonce(account: AccountId) -> Index {
 			System::account_nonce(account)

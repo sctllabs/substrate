@@ -35,6 +35,7 @@ sp-keystore = { version = "0.13.0", default-features = false, path = "../../prim
 sp-runtime = { version = "7.0.0", default-features = false, path = "../../primitives/runtime" }
 sp-state-machine = { version = "0.13.0", path = "../../primitives/state-machine" }
 sp-storage = { version = "7.0.0", path = "../../primitives/storage" }
+sp-mixnet-externalities-ext = { version = "0.1.0-dev", default-features = false, path = "../../primitives/mixnet/externalities-ext" }
 
 [dev-dependencies]
 thiserror = "1.0.30"

@@ -35,6 +35,7 @@ use sp_runtime::{
 	generic::BlockId,
 	traits::{Block as BlockT, NumberFor},
 };
+use sp_mixnet_externalities_ext::{MixnetKxPublicStoreExt, MixnetKxPublicStorePtr};
 pub use sp_state_machine::ExecutionStrategy;
 use sp_state_machine::{DefaultHandler, ExecutionManager};
 use std::{
@@ -164,6 +165,7 @@ impl<T: offchain::DbExternalities + Clone + Sync + Send + 'static> DbExternaliti
 pub struct ExecutionExtensions<Block: BlockT> {
 	strategies: ExecutionStrategies,
 	keystore: Option<SyncCryptoStorePtr>,
+	mixnet_kx_public_store: Option<MixnetKxPublicStorePtr>,
 	offchain_db: Option<Box<dyn DbExternalitiesFactory>>,
 	// FIXME: these two are only RwLock because of https://github.com/paritytech/substrate/issues/4587
 	//        remove when fixed.
@@ -180,6 +182,7 @@ impl<Block: BlockT> Default for ExecutionExtensions<Block> {
 		Self {
 			strategies: Default::default(),
 			keystore: None,
+			mixnet_kx_public_store: None,
 			offchain_db: None,
 			transaction_pool: RwLock::new(None),
 			extensions_factory: RwLock::new(Box::new(())),
@@ -188,7 +191,7 @@ impl<Block: BlockT> Default for ExecutionExtensions<Block> {
 }
 
 impl<Block: BlockT> ExecutionExtensions<Block> {
-	/// Create new `ExecutionExtensions` given a `keystore` and `ExecutionStrategies`.
+	/// Create new `ExecutionExtensions`.
 	pub fn new(
 		strategies: ExecutionStrategies,
 		keystore: Option<SyncCryptoStorePtr>,
@@ -199,6 +202,7 @@ impl<Block: BlockT> ExecutionExtensions<Block> {
 		Self {
 			strategies,
 			keystore,
+			mixnet_kx_public_store: None,
 			offchain_db,
 			extensions_factory: RwLock::new(extensions_factory),
 			transaction_pool,
@@ -241,6 +245,12 @@ impl<Block: BlockT> ExecutionExtensions<Block> {
 		if capabilities.contains(offchain::Capabilities::KEYSTORE) {
 			if let Some(ref keystore) = self.keystore {
 				extensions.register(KeystoreExt(keystore.clone()));
+			}
+		}
+
+		if capabilities.contains(offchain::Capabilities::MIXNET_KX_PUBLIC_STORE) {
+			if let Some(ref mixnet_kx_public_store) = self.mixnet_kx_public_store {
+				extensions.register(MixnetKxPublicStoreExt(mixnet_kx_public_store.clone()));
 			}
 		}
 

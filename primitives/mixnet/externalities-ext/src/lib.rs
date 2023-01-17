@@ -15,24 +15,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Mixnet externalities extension for obtaining the key-exchange public keys for the local node.
+//! Mixnet externalities extension for obtaining the key-exchange public keys for the local
+//! mixnode.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
-use sp_mixnet_types::{KxPublic, KxPublicForSessionError};
+use sp_mixnet_types::{KxPublic, KxPublicForSessionErr};
+use sp_std::sync::Arc;
 
-pub trait Mixnet: Send {
-	/// Get the key-exchange public key for the local node in the specified session. Note that
-	/// `session_index` should really be an `sp_session::SessionIndex`; it is a `u32` to avoid
-	/// circular crate dependencies.
-	fn kx_public_for_session(
-		&self,
-		session_index: u32,
-	) -> Result<KxPublic, KxPublicForSessionError>;
+pub trait MixnetKxPublicStore: Send + Sync {
+    /// Get the key-exchange public key for the local mixnode in the specified session. Note that
+    /// `session_index` should really be an `sp_session::SessionIndex`; it is a `u32` to avoid
+    /// circular crate dependencies.
+	fn public_for_session(&self, session_index: u32) -> Result<KxPublic, KxPublicForSessionErr>;
 }
+
+pub type MixnetKxPublicStorePtr = Arc<dyn MixnetKxPublicStore>;
 
 #[cfg(feature = "std")]
 sp_externalities::decl_extension! {
-	/// The mixnet extension to retrieve the local node's key-exchange public keys.
-	pub struct MixnetExt(Box<dyn Mixnet>);
+    /// The mixnet extension to retrieve the local mixnode's key-exchange public keys.
+	pub struct MixnetKxPublicStoreExt(MixnetKxPublicStorePtr);
 }

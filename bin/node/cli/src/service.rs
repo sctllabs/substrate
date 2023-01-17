@@ -506,7 +506,7 @@ pub fn new_full_base(
 	let keystore =
 		if role.is_authority() { Some(keystore_container.sync_keystore()) } else { None };
 
-	let config = grandpa::Config {
+	let grandpa_config = grandpa::Config {
 		// FIXME #1578 make this available through chainspec
 		gossip_duration: std::time::Duration::from_millis(333),
 		justification_period: 512,
@@ -525,8 +525,8 @@ pub fn new_full_base(
 		// and vote data availability than the observer. The observer has not
 		// been tested extensively yet and having most nodes in a network run it
 		// could lead to finality stalls.
-		let grandpa_config = grandpa::GrandpaParams {
-			config,
+		let grandpa_params = grandpa::GrandpaParams {
+			config: grandpa_config,
 			link: grandpa_link,
 			network: network.clone(),
 			telemetry: telemetry.as_ref().map(|x| x.handle()),
@@ -540,7 +540,7 @@ pub fn new_full_base(
 		task_manager.spawn_essential_handle().spawn_blocking(
 			"grandpa-voter",
 			None,
-			grandpa::run_grandpa_voter(grandpa_config)?,
+			grandpa::run_grandpa_voter(grandpa_params)?,
 		);
 	}
 

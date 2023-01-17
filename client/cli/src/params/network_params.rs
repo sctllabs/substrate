@@ -130,10 +130,6 @@ pub struct NetworkParams {
 	#[arg(long)]
 	pub ipfs_server: bool,
 
-	/// Enable mixnet protocol.
-	#[arg(long)]
-	pub mixnet: bool,
-
 	/// Blockchain syncing mode.
 	///
 	/// - `full`: Download and validate full blockchain history.
@@ -243,7 +239,6 @@ impl NetworkParams {
 			kademlia_disjoint_query_paths: self.kademlia_disjoint_query_paths,
 			yamux_window_size: None,
 			ipfs_server: self.ipfs_server,
-			mixnet: self.mixnet,
 			sync_mode: self.sync.into(),
 		}
 	}

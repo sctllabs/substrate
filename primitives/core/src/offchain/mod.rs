@@ -278,6 +278,8 @@ bitflags::bitflags! {
 		const NODE_AUTHORIZATION = 0b0000_1000_0000;
 		/// Access time related functionality
 		const TIME = 0b0001_0000_0000;
+		/// Mixnet key-exchange public key access.
+		const MIXNET_KX_PUBLIC_STORE = 0b0010_0000_0000;
 	}
 }
 

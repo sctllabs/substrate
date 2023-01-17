@@ -336,19 +336,17 @@ impl Peerset {
 			return
 		}
 
-		self.data.remove_no_slot_node(set_id.0, &peer_id);
+		let result = self.data.remove_no_slot_node(set_id.0, &peer_id);
 
-		// Nothing more to do if not in reserved-only mode.
-		if !self.reserved_nodes[set_id.0].1 {
-			return
-		}
-
-		// If, however, the peerset is in reserved-only mode, then the removed node needs to be
-		// disconnected.
-		if let peersstate::Peer::Connected(peer) = self.data.peer(set_id.0, &peer_id) {
-			peer.disconnect();
-			self.message_queue.push_back(Message::Drop { set_id, peer_id });
-		}
+		if (result == peersstate::RemoveNoSlotNodeResult::NoFreeSlot) ||
+            self.reserved_nodes[set_id.0].1 {
+            // Either there was no free slot for the node or we're in reserved-only mode.
+            // Disconnect the node.
+            if let peersstate::Peer::Connected(peer) = self.data.peer(set_id.0, &peer_id) {
+                peer.disconnect();
+                self.message_queue.push_back(Message::Drop { set_id, peer_id });
+            }
+        }
 	}
 
 	fn on_set_reserved_peers(&mut self, set_id: SetId, peer_ids: HashSet<PeerId>) {
