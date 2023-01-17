@@ -142,6 +142,22 @@ impl MembershipState {
 	}
 }
 
+#[derive(PartialEq)]
+pub enum RemoveNoSlotNodeResult {
+	/// The node was not in the set of nodes that don't occupy slots.
+	NotANoSlotNode,
+	/// The node was removed from the set of nodes that don't occupy slots. It was not connected.
+	NotConnected,
+	/// The node was removed from the set of nodes that don't occupy slots. It was connected. There
+	/// was a free slot that it is now using.
+	UsedFreeSlot,
+	/// The node was removed from the set of nodes that don't occupy slots. It was connected, but
+	/// there was no free slot for the node. The node was _not_ disconnected, so the number of
+	/// connected nodes now exceeds the number of slots. The caller may wish to disconnect the node
+	/// to rectify this.
+	NoFreeSlot,
+}
+
 impl PeersState {
 	/// Builds a new empty [`PeersState`].
 	pub fn new(sets: impl IntoIterator<Item = SetConfig>) -> Self {
@@ -286,19 +302,37 @@ impl PeersState {
 
 	/// Removes a node from the list of nodes that don't occupy slots.
 	///
-	/// Has no effect if the node was not in the group.
-	pub fn remove_no_slot_node(&mut self, set: usize, peer_id: &PeerId) {
+	/// Has no effect if the node is not in the group.
+	pub fn remove_no_slot_node(&mut self, set: usize, peer_id: &PeerId) -> RemoveNoSlotNodeResult {
 		// Reminder: `HashSet::remove` returns false if the node was already not in the set
 		if !self.sets[set].no_slot_nodes.remove(peer_id) {
-			return
+			return RemoveNoSlotNodeResult::NotANoSlotNode;
 		}
 
 		if let Some(peer) = self.nodes.get_mut(peer_id) {
+			let info = &mut self.sets[set];
 			match peer.sets[set] {
-				MembershipState::In => self.sets[set].num_in += 1,
-				MembershipState::Out => self.sets[set].num_out += 1,
-				MembershipState::NotConnected { .. } | MembershipState::NotMember => {},
+				MembershipState::In => {
+					info.num_in += 1;
+					if info.num_in > info.max_in {
+						RemoveNoSlotNodeResult::NoFreeSlot
+					} else {
+						RemoveNoSlotNodeResult::UsedFreeSlot
+					}
+				},
+				MembershipState::Out => {
+					info.num_out += 1;
+					if info.num_out > info.max_out {
+						RemoveNoSlotNodeResult::NoFreeSlot
+					} else {
+						RemoveNoSlotNodeResult::UsedFreeSlot
+					}
+				},
+				MembershipState::NotConnected { .. } | MembershipState::NotMember =>
+					RemoveNoSlotNodeResult::NotConnected,
 			}
+		} else {
+			RemoveNoSlotNodeResult::NotConnected
 		}
 	}
 }

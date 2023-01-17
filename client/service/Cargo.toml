@@ -59,6 +59,8 @@ sc-network-sync = { version = "0.10.0-dev", path = "../network/sync" }
 sc-network-transactions = { version = "0.10.0-dev", path = "../network/transactions" }
 sc-chain-spec = { version = "4.0.0-dev", path = "../chain-spec" }
 sc-mixnet = { version = "0.1.0-dev", path = "../mixnet" }
+sc-mixnet2 = { version = "0.1.0-dev", path = "../mixnet2" }
+sp-mixnet-externalities-ext = { version = "0.1.0-dev", path = "../../primitives/mixnet/externalities-ext" }
 sc-client-api = { version = "4.0.0-dev", path = "../api" }
 sp-api = { version = "4.0.0-dev", path = "../../primitives/api" }
 sc-client-db = { version = "0.10.0-dev", default-features = false, path = "../db" }

@@ -145,6 +145,7 @@ pub fn new_partial(
 			),
 			grandpa::SharedVoterState,
 			Option<Telemetry>,
+            Option<sc_mixnet2::KxStore>,
 		),
 	>,
 	ServiceError,
@@ -167,7 +168,7 @@ pub fn new_partial(
 		config.runtime_cache_size,
 	);
 
-	let (client, backend, keystore_container, task_manager) =
+	let (client, backend, keystore_container, task_manager, mixnet_keystore) =
 		sc_service::new_full_parts::<Block, RuntimeApi, _>(
 			config,
 			telemetry.as_ref().map(|(_, telemetry)| telemetry.handle()),
@@ -290,7 +291,7 @@ pub fn new_partial(
 		select_chain,
 		import_queue,
 		transaction_pool,
-		other: (rpc_extensions_builder, import_setup, rpc_setup, telemetry),
+		other: (rpc_extensions_builder, import_setup, rpc_setup, telemetry, mixnet_keystore),
 	})
 }
 
@@ -334,7 +335,7 @@ pub fn new_full_base(
 		keystore_container,
 		select_chain,
 		transaction_pool,
-		other: (rpc_builder, import_setup, rpc_setup, mut telemetry),
+		other: (rpc_builder, import_setup, rpc_setup, mut telemetry, mixnet_keystore),
 	} = new_partial(&config)?;
 
 	let shared_voter_state = rpc_setup;
@@ -358,14 +359,15 @@ pub fn new_full_base(
 	let mut mixnet_worker = None;
 	let role = config.role.clone();
 
-	// mixnet is optional for non validator node, mandatory for validator.
-	if config.mixnet || role.is_authority() {
+	if let Some(mixnet_config) = &config.mixnet {
 		let (mixnet_to_network, network_to_mixnet) = sc_mixnet::new_channels();
 		mixnet = Some(network_to_mixnet);
 		let local_id = config.network.node_key.clone().into_keypair()?;
 		let authority_set = import_setup.1.shared_authority_set().clone();
 		let metrics = config.prometheus_registry().cloned();
 		mixnet_worker = Some((authority_set, mixnet_to_network, local_id, metrics));
+        config.network.extra_sets.push(
+            sc_mixnet2::peers_set_config(mixnet_config, role.is_authority()));
 	}
 
 	let (network, system_rpc_tx, mixnet_tx, tx_handler_controller, network_starter) =
@@ -395,6 +397,8 @@ pub fn new_full_base(
 	let name = config.network.node_name.clone();
 	let enable_grandpa = !config.disable_grandpa;
 	let prometheus_registry = config.prometheus_registry().cloned();
+
+    let mixnet_config = config.mixnet.take();
 
 	let rpc_handlers = sc_service::spawn_tasks(sc_service::SpawnTasksParams {
 		config,
@@ -527,7 +531,7 @@ pub fn new_full_base(
 	let keystore =
 		if role.is_authority() { Some(keystore_container.sync_keystore()) } else { None };
 
-	let config = grandpa::Config {
+	let grandpa_config = grandpa::Config {
 		// FIXME #1578 make this available through chainspec
 		gossip_duration: std::time::Duration::from_millis(333),
 		justification_period: 512,
@@ -546,8 +550,8 @@ pub fn new_full_base(
 		// and vote data availability than the observer. The observer has not
 		// been tested extensively yet and having most nodes in a network run it
 		// could lead to finality stalls.
-		let grandpa_config = grandpa::GrandpaParams {
-			config,
+		let grandpa_params = grandpa::GrandpaParams {
+			config: grandpa_config,
 			link: grandpa_link,
 			network: network.clone(),
 			telemetry: telemetry.as_ref().map(|x| x.handle()),
@@ -561,9 +565,23 @@ pub fn new_full_base(
 		task_manager.spawn_essential_handle().spawn_blocking(
 			"grandpa-voter",
 			None,
-			grandpa::run_grandpa_voter(grandpa_config)?,
+			grandpa::run_grandpa_voter(grandpa_params)?,
 		);
 	}
+
+    if let Some(mixnet_keystore) = mixnet_keystore {
+        let mixnet = sc_mixnet2::run(
+            mixnet_config.expect("Mixnet keystore only created if there is a mixnet config"),
+            client.clone(),
+            network.clone(),
+            authority_discovery_service.as_ref().unwrap().clone(),
+            keystore_container.keystore(),
+            mixnet_keystore
+        );
+        task_manager
+            .spawn_handle()
+            .spawn("mixnet2-worker", None, mixnet);
+    }
 
 	if let Some((authority_set, channels_to_network, local_id, metrics)) = mixnet_worker {
 		if let Some(mixnet_worker) = sc_mixnet::MixnetWorker::new(

@@ -1,4 +1,4 @@
 Mixnet externalities extension for obtaining the key-exchange public keys for
-the local node.
+the local mixnode.
 
 License: Apache-2.0

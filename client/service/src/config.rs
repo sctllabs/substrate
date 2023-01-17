@@ -150,8 +150,8 @@ pub struct Configuration {
 	pub informant_output_format: sc_informant::OutputFormat,
 	/// Maximum number of different runtime versions that can be cached.
 	pub runtime_cache_size: u8,
-	/// Run mixnet.
-	pub mixnet: bool,
+	/// Mixnet configuration. If `None`, mixnet is disabled.
+	pub mixnet: Option<sc_mixnet2::Config>,
 }
 
 /// Type for tasks spawned by the executor.

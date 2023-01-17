@@ -85,7 +85,7 @@ pub type TFullCallExecutor<TBl, TExec> =
 	crate::client::LocalCallExecutor<TBl, sc_client_db::Backend<TBl>, TExec>;
 
 type TFullParts<TBl, TRtApi, TExec> =
-	(TFullClient<TBl, TRtApi, TExec>, Arc<TFullBackend<TBl>>, KeystoreContainer, TaskManager);
+	(TFullClient<TBl, TRtApi, TExec>, Arc<TFullBackend<TBl>>, KeystoreContainer, TaskManager, Option<sc_mixnet2::KxStore>);
 
 trait AsCryptoStoreRef {
 	fn keystore_ref(&self) -> Arc<dyn CryptoStore>;
@@ -196,6 +196,8 @@ where
 		TaskManager::new(config.tokio_handle.clone(), registry)?
 	};
 
+    let mixnet_kx_store = config.mixnet.is_some().then(|| sc_mixnet2::KxStore::new());
+
 	let chain_spec = &config.chain_spec;
 	let fork_blocks = get_extension::<ForkBlocks<TBl>>(chain_spec.extensions())
 		.cloned()
@@ -218,6 +220,7 @@ where
 		let extensions = sc_client_api::execution_extensions::ExecutionExtensions::new(
 			config.execution_strategies.clone(),
 			Some(keystore_container.sync_keystore()),
+            mixnet_kx_store.as_ref().map(|kx_store| kx_store.public() as Arc<dyn sp_mixnet_externalities_ext::MixnetKxPublicStore>),
 			sc_offchain::OffchainDb::factory_from_backend(&*backend),
 		);
 
@@ -263,7 +266,7 @@ where
 		(client, backend)
 	};
 
-	Ok((client, backend, keystore_container, task_manager))
+	Ok((client, backend, keystore_container, task_manager, mixnet_kx_store))
 }
 
 /// Create an instance of default DB-backend backend.

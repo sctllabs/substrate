@@ -26,32 +26,33 @@ use serde::{Deserialize, Serialize};
 /// Index of an authority in the authority list for a session.
 pub type AuthorityIndex = u32;
 
-/// X25519 public key used for key exchange between message senders and mixnet nodes (authorities).
-/// Authorities rotate and publish theirs on-chain every session, signed by a session key. Message
-/// senders generate new keys for every message they send.
+/// X25519 public key used for key exchange between message senders and mixnodes (subset of
+/// authorities). Authorities rotate and publish theirs on-chain every session, signed by a session
+/// key. Message senders generate new keys for every message they send.
 pub type KxPublic = [u8; 32];
 
+#[derive(Decode, Encode)]
 #[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
-/// Mixnet node information needed by message senders.
-pub struct Node {
-	/// Index of node in authority list. The session is implied by `kx_public`.
-	pub index: AuthorityIndex,
-	/// Key-exchange public key for the node.
+/// Mixnode information needed by message senders.
+pub struct Mixnode {
+	/// Index of mixnode in authority list. The session is implied by `kx_public`.
+	pub authority_index: AuthorityIndex,
+	/// Key-exchange public key for the mixnode.
 	pub kx_public: KxPublic,
 }
 
-#[derive(Decode, Encode)]
-/// Errors that may be returned by `kx_public_for_session`.
-pub enum KxPublicForSessionError {
+#[derive(Decode, Encode, PartialEq)]
+/// Errors that may be returned when getting the key-exchange public key for a session.
+pub enum KxPublicForSessionErr {
 	/// The key for this session was discarded already.
 	Discarded,
 }
 
-impl sp_std::fmt::Debug for KxPublicForSessionError {
+impl sp_std::fmt::Debug for KxPublicForSessionErr {
 	fn fmt(&self, fmt: &mut sp_std::fmt::Formatter) -> sp_std::fmt::Result {
 		match self {
-			KxPublicForSessionError::Discarded => {
-				write!(fmt, "The key pair was discarded as it was too old.")
+			KxPublicForSessionErr::Discarded => {
+				write!(fmt, "The key pair was discarded due to age")
 			},
 		}
 	}

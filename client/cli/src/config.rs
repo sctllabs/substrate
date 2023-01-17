@@ -562,7 +562,7 @@ pub trait CliConfiguration<DCV: DefaultConfigurationValues = ()>: Sized {
 			base_path: Some(base_path),
 			informant_output_format: Default::default(),
 			runtime_cache_size,
-			mixnet: self.mixnet(),
+			mixnet: self.mixnet().then(|| Default::default()),
 		})
 	}
 
@@ -665,7 +665,7 @@ pub trait CliConfiguration<DCV: DefaultConfigurationValues = ()>: Sized {
 
 	/// Is mixnet enabled.
 	fn mixnet(&self) -> bool {
-		false
+		true
 	}
 }
 

@@ -31,6 +31,7 @@ use sp_core::{
 };
 use sp_externalities::Extensions;
 use sp_keystore::{KeystoreExt, SyncCryptoStorePtr};
+use sp_mixnet_externalities_ext::{MixnetKxPublicStoreExt, MixnetKxPublicStorePtr};
 use sp_runtime::{generic::BlockId, traits};
 pub use sp_state_machine::ExecutionStrategy;
 use sp_state_machine::{DefaultHandler, ExecutionManager};
@@ -95,6 +96,7 @@ impl<T: offchain::DbExternalities + Clone + Sync + Send + 'static> DbExternaliti
 pub struct ExecutionExtensions<Block: traits::Block> {
 	strategies: ExecutionStrategies,
 	keystore: Option<SyncCryptoStorePtr>,
+	mixnet_kx_public_store: Option<MixnetKxPublicStorePtr>,
 	offchain_db: Option<Box<dyn DbExternalitiesFactory>>,
 	// FIXME: these two are only RwLock because of https://github.com/paritytech/substrate/issues/4587
 	//        remove when fixed.
@@ -111,6 +113,7 @@ impl<Block: traits::Block> Default for ExecutionExtensions<Block> {
 		Self {
 			strategies: Default::default(),
 			keystore: None,
+			mixnet_kx_public_store: None,
 			offchain_db: None,
 			transaction_pool: RwLock::new(None),
 			extensions_factory: RwLock::new(Box::new(())),
@@ -119,10 +122,11 @@ impl<Block: traits::Block> Default for ExecutionExtensions<Block> {
 }
 
 impl<Block: traits::Block> ExecutionExtensions<Block> {
-	/// Create new `ExecutionExtensions` given a `keystore` and `ExecutionStrategies`.
+	/// Create new `ExecutionExtensions`.
 	pub fn new(
 		strategies: ExecutionStrategies,
 		keystore: Option<SyncCryptoStorePtr>,
+		mixnet_kx_public_store: Option<MixnetKxPublicStorePtr>,
 		offchain_db: Option<Box<dyn DbExternalitiesFactory>>,
 	) -> Self {
 		let transaction_pool = RwLock::new(None);
@@ -130,6 +134,7 @@ impl<Block: traits::Block> ExecutionExtensions<Block> {
 		Self {
 			strategies,
 			keystore,
+			mixnet_kx_public_store,
 			offchain_db,
 			extensions_factory: RwLock::new(extensions_factory),
 			transaction_pool,
@@ -164,6 +169,12 @@ impl<Block: traits::Block> ExecutionExtensions<Block> {
 		if capabilities.contains(offchain::Capabilities::KEYSTORE) {
 			if let Some(ref keystore) = self.keystore {
 				extensions.register(KeystoreExt(keystore.clone()));
+			}
+		}
+
+		if capabilities.contains(offchain::Capabilities::MIXNET_KX_PUBLIC_STORE) {
+			if let Some(ref mixnet_kx_public_store) = self.mixnet_kx_public_store {
+				extensions.register(MixnetKxPublicStoreExt(mixnet_kx_public_store.clone()));
 			}
 		}
 
