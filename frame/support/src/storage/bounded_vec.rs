@@ -22,6 +22,7 @@ use crate::{
 	storage::{StorageDecodeLength, StorageTryAppend},
 	traits::Get,
 };
+use crate::pallet_prelude::ValueQuery;
 pub use sp_runtime::{BoundedSlice, BoundedVec};
 
 impl<T, S> StorageDecodeLength for BoundedVec<T, S> {}
@@ -42,11 +43,48 @@ pub mod test {
 	type Foo = StorageValue<Prefix, BoundedVec<u32, ConstU32<7>>>;
 
 	#[crate::storage_alias]
+	type ValueFoo = StorageValue<Prefix, BoundedVec<u32, ConstU32<7>>, ValueQuery>;
+
+	#[crate::storage_alias]
 	type FooMap = StorageMap<Prefix, Twox128, u32, BoundedVec<u32, ConstU32<7>>>;
 
 	#[crate::storage_alias]
 	type FooDoubleMap =
 		StorageDoubleMap<Prefix, Twox128, u32, Twox128, u32, BoundedVec<u32, ConstU32<7>>>;
+
+	use codec::Encode;
+
+	#[test]
+	fn decoding_with_shorter_bound_fails() {
+		TestExternalities::default().execute_with(|| {
+			// First we put a value in there and verify that it is there.
+			let short: BoundedVec<u32, ConstU32<7>> = bounded_vec![1; 7];
+			let long: BoundedVec<u32, ConstU32<8>> = bounded_vec![1; 8];
+			Foo::put(&short);
+			assert_eq!(Foo::get(), Some(short));
+
+			// put into the raw storage of Foo
+			crate::storage::unhashed::put_raw(&Foo::hashed_key(), &long.encode());
+			// decode with a shorter bound
+			assert!(Foo::get().is_none());
+		});
+	}
+
+	#[test]
+	fn decoding_with_shorter_bound_fails2() {
+		TestExternalities::default().execute_with(|| {
+			// First we put a value in there and verify that it is there.
+			let short: BoundedVec<u32, ConstU32<7>> = bounded_vec![1; 7];
+			let long: BoundedVec<u32, ConstU32<8>> = bounded_vec![1; 8];
+			ValueFoo::put(&short);
+			assert_eq!(ValueFoo::get(), short);
+
+			// put into the raw storage of Foo
+			crate::storage::unhashed::put_raw(&ValueFoo::hashed_key(), &long.encode());
+			// decode with a shorter bound
+			assert_eq!(ValueFoo::get(), BoundedVec::<u32, ConstU32<7>>::default());
+		});
+	}
 
 	#[test]
 	fn decode_len_works() {
