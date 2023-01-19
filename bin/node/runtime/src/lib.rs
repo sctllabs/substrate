@@ -1707,11 +1707,19 @@ impl frame_benchmarking_pallet_pov::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 }
 
+parameter_types! {
+	pub const CloseMixnetRegistrationsAt: Permill = Permill::from_percent(75);
+}
+
 impl pallet_mixnet::Config for Runtime {
 	type MaxAuthorities = MaxAuthorities;
-	type ValidatorSet = Historical;
-	type NextSessionRotation = Babe;
-	type RegistrationPriority = MixnetUnsignedPriority;
+	type MaxPeerIdSize = ConstU32<64>;
+	type MaxMultiaddrSize = ConstU32<128>;
+	type MaxMultiaddrsPerMixnode = ConstU32<16>;
+    type ValidatorSet = Historical;
+    type NextSessionRotation = Babe;
+	type CloseRegistrationsAt = CloseMixnetRegistrationsAt;
+    type RegistrationPriority = MixnetUnsignedPriority;
 }
 
 construct_runtime!(
@@ -2054,24 +2062,16 @@ impl_runtime_apis! {
 	}
 
     impl sp_mixnet_runtime_api::MixnetApi<Block> for Runtime {
-		fn current_session_index() -> sp_session::SessionIndex {
-            Session::current_index()
+		fn session_status() -> sp_mixnet_types::SessionStatus {
+            Mixnet::session_status()
         }
 
-		fn prev_authority_discovery_ids() -> Vec<AuthorityDiscoveryId> {
-            AuthorityDiscovery::prev_authorities().into_inner()
-        }
-
-		fn current_authority_discovery_ids() -> Vec<AuthorityDiscoveryId> {
-            AuthorityDiscovery::current_authorities().into_inner()
-        }
-
-		fn next_authority_discovery_ids() -> Vec<AuthorityDiscoveryId> {
-            AuthorityDiscovery::next_authorities().into_inner()
-        }
-
-		fn current_mixnodes() -> Vec<sp_mixnet_types::Mixnode> {
+		fn current_mixnodes() -> Vec<sp_mixnet_types::OpaqueMixnode> {
             Mixnet::current_mixnodes()
+        }
+
+		fn next_mixnodes() -> Vec<sp_mixnet_types::OpaqueMixnode> {
+            Mixnet::next_mixnodes()
         }
     }
 

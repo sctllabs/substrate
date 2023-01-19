@@ -23,6 +23,8 @@ scale-info = { version = "2.1.1", default-features = false, features = ["derive"
 sp-application-crypto = { version = "7.0.0", default-features = false, path = "../../primitives/application-crypto" }
 sp-arithmetic = { version = "6.0.0", default-features = false, path = "../../primitives/arithmetic" }
 sp-io = { version = "7.0.0", default-features = false, path = "../../primitives/io" }
+sp-core = { version = "7.0.0", default-features = false, path = "../../primitives/core" }
+serde = { version = "1.0.136", optional = true }
 sp-mixnet-types = { version = "0.1.0-dev", default-features = false, path = "../../primitives/mixnet/types" }
 sp-runtime = { version = "7.0.0", default-features = false, path = "../../primitives/runtime" }
 sp-session = { version = "4.0.0-dev", default-features = false, path = "../../primitives/session" }
@@ -37,8 +39,10 @@ std = [
     "frame-system/std",
     "log/std",
     "scale-info/std",
+    "serde",
     "sp-application-crypto/std",
     "sp-arithmetic/std",
+	"sp-core/std",
     "sp-io/std",
     "sp-mixnet-types/std",
     "sp-runtime/std",

@@ -6078,8 +6078,10 @@ dependencies = [
  "log",
  "parity-scale-codec",
  "scale-info",
+ "serde",
  "sp-application-crypto",
  "sp-arithmetic",
+ "sp-core",
  "sp-io",
  "sp-mixnet-types",
  "sp-runtime",
@@ -10189,6 +10191,7 @@ version = "0.1.0-dev"
 dependencies = [
  "parity-scale-codec",
  "serde",
+ "sp-core",
  "sp-std",
 ]
 

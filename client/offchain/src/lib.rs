@@ -53,6 +53,7 @@ use threadpool::ThreadPool;
 
 mod api;
 
+pub use api::NetworkState;
 pub use api::Db as OffchainDb;
 pub use sp_offchain::{OffchainWorkerApi, STORAGE_PREFIX};
 

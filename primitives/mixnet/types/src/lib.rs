@@ -20,35 +20,40 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 use codec::{Decode, Encode};
-#[cfg(feature = "std")]
-use serde::{Deserialize, Serialize};
+pub use sp_core::offchain::OpaqueNetworkState;
 
-/// Index of an authority in the authority list for a session.
-pub type AuthorityIndex = u32;
+#[derive(Decode, Encode)]
+pub struct SessionStatus {
+	/// Index of the current session. Should really be an `sp_session::SessionIndex`; it is a `u32` to
+	/// avoid circular crate dependencies.
+	pub current_index: u32,
+	/// Are mixnode registrations for the next session closed? Once closed, the next mixnode set is
+	/// fixed and will not change.
+	pub next_registrations_closed: bool,
+}
 
-/// X25519 public key used for key exchange between message senders and mixnodes (subset of
-/// authorities). Authorities rotate and publish theirs on-chain every session, signed by a session
-/// key. Message senders generate new keys for every message they send.
+/// X25519 public key, for key exchange between message senders and mixnodes. Mixnodes rotate and
+/// publish theirs on-chain every session. Message senders generate new keys for every message they
+/// send.
 pub type KxPublic = [u8; 32];
 
 #[derive(Decode, Encode)]
-#[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
-/// Mixnode information needed by message senders.
-pub struct Mixnode {
-	/// Index of mixnode in authority list. The session is implied by `kx_public`.
-	pub authority_index: AuthorityIndex,
+/// Information published on-chain by each mixnode every session.
+pub struct OpaqueMixnode {
 	/// Key-exchange public key for the mixnode.
 	pub kx_public: KxPublic,
+	/// Mixnode network state (peer ID and multiaddrs).
+	pub network_state: OpaqueNetworkState,
 }
 
-#[derive(Decode, Encode, PartialEq)]
+#[derive(Decode, Encode, PartialEq, Eq)]
 /// Errors that may be returned when getting the key-exchange public key for a session.
 pub enum KxPublicForSessionErr {
 	/// The key for this session was discarded already.
 	Discarded,
 }
 
-impl sp_std::fmt::Debug for KxPublicForSessionErr {
+impl sp_std::fmt::Display for KxPublicForSessionErr {
 	fn fmt(&self, fmt: &mut sp_std::fmt::Formatter) -> sp_std::fmt::Result {
 		match self {
 			KxPublicForSessionErr::Discarded => {
