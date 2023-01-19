@@ -220,7 +220,7 @@ where
 		let extensions = sc_client_api::execution_extensions::ExecutionExtensions::new(
 			config.execution_strategies.clone(),
 			Some(keystore_container.sync_keystore()),
-            mixnet_kx_store.as_ref().map(|kx_store| kx_store.public() as Arc<dyn sp_mixnet_externalities_ext::MixnetKxPublicStore>),
+            mixnet_kx_store.as_ref().map(|kx_store| kx_store.public().clone() as Arc<dyn sp_mixnet_externalities_ext::MixnetKxPublicStore>),
 			sc_offchain::OffchainDb::factory_from_backend(&*backend),
 		);
 

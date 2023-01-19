@@ -6086,8 +6086,10 @@ dependencies = [
  "log",
  "parity-scale-codec",
  "scale-info",
+ "serde",
  "sp-application-crypto",
  "sp-arithmetic",
+ "sp-core",
  "sp-io",
  "sp-mixnet-types",
  "sp-runtime",
@@ -8765,14 +8767,12 @@ dependencies = [
  "rand 0.7.3",
  "rand_distr 0.3.0",
  "rand_xoshiro",
- "sc-authority-discovery",
  "sc-client-api",
  "sc-network-common",
+ "sc-offchain",
  "siphasher",
  "sp-api",
- "sp-authority-discovery",
  "sp-core",
- "sp-keystore",
  "sp-mixnet-externalities-ext",
  "sp-mixnet-runtime-api",
  "sp-mixnet-types",
@@ -10358,7 +10358,7 @@ name = "sp-mixnet-types"
 version = "0.1.0-dev"
 dependencies = [
  "parity-scale-codec",
- "serde",
+ "sp-core",
  "sp-std",
 ]
 

@@ -1,0 +1,42 @@
+[package]
+description = "Substrate mixnet integration"
+name = "sc-mixnet2" # TODO Rename
+version = "0.1.0-dev"
+license = "GPL-3.0-or-later WITH Classpath-exception-2.0"
+authors = ["Parity Technologies <admin@parity.io>"]
+edition = "2021"
+homepage = "https://substrate.io"
+repository = "https://github.com/paritytech/substrate/"
+readme = "README.md"
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[dependencies]
+arrayvec = "0.7.2"
+bitflags = "1.3.2"
+bytes = "1"
+either = "1.5.3"
+futures = "0.3.21"
+futures-timer = "3.0.2"
+libp2p = "0.46.1"
+log = "0.4.17"
+mixnet-sphinx = { version = "0.1.0-dev", path = "../../../mixnet-sphinx" }
+rand = "0.7.2"
+rand_distr = "0.3.0"
+sc-client-api = { version = "4.0.0-dev", path = "../api" }
+sc-network-common = { version = "0.10.0-dev", path = "../network/common" }
+sc-offchain = { version = "4.0.0-dev", path = "../offchain" }
+siphasher = "0.3.10"
+sp-api = { version = "4.0.0-dev", path = "../../primitives/api" }
+sp-core = { version = "6.0.0", path = "../../primitives/core" }
+sp-mixnet-externalities-ext = { version = "0.1.0-dev", path = "../../primitives/mixnet/externalities-ext" }
+sp-mixnet-runtime-api = { version = "0.1.0-dev", path = "../../primitives/mixnet/runtime-api" }
+sp-mixnet-types = { version = "0.1.0-dev", path = "../../primitives/mixnet/types" }
+sp-runtime = { version = "6.0.0", path = "../../primitives/runtime" }
+sp-session = { version = "4.0.0-dev", path = "../../primitives/session" }
+thiserror = "1.0.30"
+x25519-dalek = "1.1.1"
+
+[dev-dependencies]
+rand_xoshiro = "0.4.0"

@@ -237,8 +237,8 @@ impl offchain::Externalities for Api {
 /// Information about the local node's network state.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct NetworkState {
-	peer_id: PeerId,
-	external_addresses: Vec<Multiaddr>,
+	pub peer_id: PeerId,
+	pub external_addresses: Vec<Multiaddr>,
 }
 
 impl NetworkState {

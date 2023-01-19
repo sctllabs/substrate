@@ -574,8 +574,6 @@ pub fn new_full_base(
             mixnet_config.expect("Mixnet keystore only created if there is a mixnet config"),
             client.clone(),
             network.clone(),
-            authority_discovery_service.as_ref().unwrap().clone(),
-            keystore_container.keystore(),
             mixnet_keystore
         );
         task_manager

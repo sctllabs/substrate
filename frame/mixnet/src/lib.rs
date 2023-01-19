@@ -18,15 +18,24 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 use arrayref::array_refs;
-use codec::{Decode, Encode};
-use frame_support::traits::{EstimateNextSessionRotation, Get, OneSessionHandler, ValidatorSet};
+use codec::{Decode, Encode, MaxEncodedLen};
+use frame_support::{
+	traits::{EstimateNextSessionRotation, Get, OneSessionHandler, ValidatorSet},
+	BoundedVec,
+};
 use frame_system::offchain::{SendTransactionTypes, SubmitTransaction};
 pub use pallet::*;
 use scale_info::TypeInfo;
+#[cfg(feature = "std")]
+use serde::{Deserialize, Serialize};
 use sp_application_crypto::RuntimeAppPublic;
 use sp_arithmetic::{per_things::Permill, traits::AtLeast32BitUnsigned};
+use sp_core::{
+	offchain::{OpaqueMultiaddr, OpaqueNetworkState},
+	OpaquePeerId,
+};
 use sp_io::MultiRemovalResults;
-use sp_mixnet_types::{AuthorityIndex, KxPublic, KxPublicForSessionErr, Mixnode};
+use sp_mixnet_types::{KxPublic, KxPublicForSessionErr, OpaqueMixnode, SessionStatus};
 use sp_runtime::{
 	offchain::storage::{MutateStorageError, StorageRetrievalError, StorageValueRef},
 	RuntimeDebug,
@@ -39,24 +48,72 @@ mod app {
 	app_crypto!(sr25519, MIXNET);
 }
 
+type AuthorityIndex = u32;
 pub type AuthorityId = app::Public;
 type AuthoritySignature = app::Signature;
 
+#[derive(Clone, Decode, Encode, MaxEncodedLen, PartialEq, TypeInfo, RuntimeDebug)]
+#[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
+/// Identical to `OpaqueMixnode`, but encoded size is bounded.
+pub struct BoundedOpaqueMixnode<PeerId, Multiaddrs> {
+	/// Key-exchange public key for the mixnode.
+	pub kx_public: KxPublic,
+	/// libp2p peer ID of the mixnode.
+	pub peer_id: PeerId,
+	/// libp2p multiaddrs for the mixnode.
+	pub external_addresses: Multiaddrs,
+}
+
+impl<MaxPeerIdSize, MaxMultiaddrSize, MaxMultiaddrs> Into<OpaqueMixnode>
+	for BoundedOpaqueMixnode<
+		BoundedVec<u8, MaxPeerIdSize>,
+		BoundedVec<BoundedVec<u8, MaxMultiaddrSize>, MaxMultiaddrs>,
+	> where
+	MaxPeerIdSize: Get<u32>,
+	MaxMultiaddrSize: Get<u32>,
+	MaxMultiaddrs: Get<u32>,
+{
+	fn into(self) -> OpaqueMixnode {
+		OpaqueMixnode {
+			kx_public: self.kx_public,
+			network_state: OpaqueNetworkState {
+				peer_id: OpaquePeerId(self.peer_id.into_inner()),
+				external_addresses: self
+					.external_addresses
+					.into_iter()
+					.map(|multiaddr| OpaqueMultiaddr(multiaddr.into_inner()))
+					.collect(),
+			},
+		}
+	}
+}
+
+pub type BoundedOpaqueMixnodeFor<T> = BoundedOpaqueMixnode<
+	BoundedVec<u8, <T as Config>::MaxPeerIdSize>,
+	BoundedVec<
+		BoundedVec<u8, <T as Config>::MaxMultiaddrSize>,
+		<T as Config>::MaxMultiaddrsPerMixnode,
+	>,
+>;
+
 #[derive(Clone, Decode, Encode, PartialEq, TypeInfo, RuntimeDebug)]
-pub struct Registration<BlockNumber> {
+pub struct Registration<BlockNumber, BoundedOpaqueMixnode> {
 	/// Block number at the time of creation. When a registration transaction fails to make it on
 	/// to the chain for whatever reason, we send out another one. We want this one to have a
 	/// different hash in case the earlier transaction got banned somewhere; including the block
 	/// number is a simple way of achieving this.
 	pub block_number: BlockNumber,
-    /// The session during which this registration should be processed. Note that on success the
-    /// node is registered as part of the mixnode set for the _following_ session.
+	/// The session during which this registration should be processed. Note that on success the
+	/// mixnode is registered for the _following_ session.
 	pub session_index: SessionIndex,
-    /// The index in the next session's authority list of the authority registering as a mixnode.
+	/// The index in the next session's authority list of the authority registering as a mixnode.
 	pub authority_index: AuthorityIndex,
-	/// The key-exchange public key to be used during the following session.
-	pub kx_public: KxPublic,
+	/// Mixnode information to register for the following session.
+	pub mixnode: BoundedOpaqueMixnode,
 }
+
+pub type RegistrationFor<T> =
+	Registration<<T as frame_system::Config>::BlockNumber, BoundedOpaqueMixnodeFor<T>>;
 
 #[derive(Decode, Encode)]
 /// Details of registration attempt, recorded in offchain storage.
@@ -73,12 +130,12 @@ struct RegistrationAttempt<BlockNumber> {
 
 impl<BlockNumber: AtLeast32BitUnsigned + Copy> RegistrationAttempt<BlockNumber> {
 	fn ok_to_replace_with(&self, other: &Self) -> bool {
-		if (self.session_index != other.session_index)
-			|| (self.authority_index != other.authority_index)
-			|| (self.authority_id != other.authority_id)
+		if (self.session_index != other.session_index) ||
+			(self.authority_index != other.authority_index) ||
+			(self.authority_id != other.authority_id)
 		{
 			// Not equivalent; ok to replace
-			return true;
+			return true
 		}
 
 		// Equivalent; ok to replace if we have waited long enough
@@ -87,19 +144,26 @@ impl<BlockNumber: AtLeast32BitUnsigned + Copy> RegistrationAttempt<BlockNumber> 
 }
 
 enum OffchainErr<BlockNumber> {
+	RegistrationsClosed,
 	WaitingForSessionProgress,
 	NotAnAuthority,
 	AlreadyRegistered,
 	WaitingForInclusion(BlockNumber),
 	LostRace,
 	KxPublicForSessionFailed(KxPublicForSessionErr),
+	NetworkStateFailed,
+	NoMultiaddrs,
+	PeerIdTooBig,
+	MultiaddrsTooBig,
 	SigningFailed,
 	SubmitFailed,
 }
 
-impl<BlockNumber: sp_std::fmt::Debug> sp_std::fmt::Debug for OffchainErr<BlockNumber> {
+impl<BlockNumber: sp_std::fmt::Debug> sp_std::fmt::Display for OffchainErr<BlockNumber> {
 	fn fmt(&self, fmt: &mut sp_std::fmt::Formatter) -> sp_std::fmt::Result {
 		match self {
+			OffchainErr::RegistrationsClosed =>
+				write!(fmt, "Mixnode registrations closed for the next session"),
 			OffchainErr::WaitingForSessionProgress => {
 				write!(fmt, "Waiting for the session to progress further before registering")
 			},
@@ -107,15 +171,22 @@ impl<BlockNumber: sp_std::fmt::Debug> sp_std::fmt::Debug for OffchainErr<BlockNu
 			OffchainErr::AlreadyRegistered => {
 				write!(fmt, "Already registered as a mixnode in the next session")
 			},
-			OffchainErr::WaitingForInclusion(block_number) => write!(
-				fmt,
-				"Registration already sent at {:?}. Waiting for inclusion",
-				block_number
-			),
+			OffchainErr::WaitingForInclusion(block_number) =>
+				write!(fmt, "Registration already sent at {:?}. Waiting for inclusion", block_number),
 			OffchainErr::LostRace => write!(fmt, "Lost a race with another offchain worker"),
 			OffchainErr::KxPublicForSessionFailed(err) => {
-				write!(fmt, "Failed to get key-exchange public key for session: {:?}", err)
+				write!(fmt, "Failed to get key-exchange public key for session: {}", err)
 			},
+			OffchainErr::NetworkStateFailed =>
+				write!(fmt, "Failed to get peer ID and multiaddrs for the local node"),
+			OffchainErr::NoMultiaddrs =>
+				write!(fmt, "Don't have any multiaddrs for the local node"),
+			OffchainErr::PeerIdTooBig =>
+				write!(fmt, "Local node peer ID too big to fit in registration transaction"),
+			OffchainErr::MultiaddrsTooBig => write!(
+				fmt,
+				"All multiaddrs for the local node too big to fit in registration transaction"
+			),
 			OffchainErr::SigningFailed => write!(fmt, "Failed to sign registration"),
 			OffchainErr::SubmitFailed => write!(fmt, "Failed to submit registration transaction"),
 		}
@@ -135,21 +206,37 @@ pub mod pallet {
 
 	#[pallet::config]
 	pub trait Config: frame_system::Config + SendTransactionTypes<Call<Self>> {
-		/// The maximum number of authorities per session.
 		#[pallet::constant]
-		type MaxAuthorities: Get<u32>;
+		/// The maximum number of authorities per session.
+		type MaxAuthorities: Get<AuthorityIndex>;
+
+		#[pallet::constant]
+		/// The maximum size of a mixnode's libp2p peer ID.
+		type MaxPeerIdSize: Get<u32>;
+
+		#[pallet::constant]
+		/// The maximum size of one of a mixnode's libp2p multiaddrs.
+		type MaxMultiaddrSize: Get<u32>;
+
+		#[pallet::constant]
+		/// The maximum number of multiaddrs for a mixnode.
+		type MaxMultiaddrsPerMixnode: Get<u32>;
 
 		/// Just for retrieving the current session index.
 		type ValidatorSet: ValidatorSet<Self::AccountId>;
 
 		/// Session progress/length estimation. Used to determine when to send registration
 		/// transactions (we want these transactions to be roughly evenly spaced out over each
-		/// session to avoid load spikes). Also used to determine the longevity of these
-		/// transactions.
+		/// session to avoid load spikes), the longevity of these transactions, and when to close
+		/// registrations.
 		type NextSessionRotation: EstimateNextSessionRotation<Self::BlockNumber>;
 
-		/// Priority of unsigned transactions used to register mixnodes.
 		#[pallet::constant]
+		/// How far through a session to close mixnode registrations for the next session.
+		type CloseRegistrationsAt: Get<Permill>;
+
+		#[pallet::constant]
+		/// Priority of unsigned transactions used to register mixnodes.
 		type RegistrationPriority: Get<TransactionPriority>;
 	}
 
@@ -158,16 +245,22 @@ pub mod pallet {
 	pub(crate) type NextAuthorityIds<T> = StorageMap<_, Identity, AuthorityIndex, AuthorityId>;
 
 	#[pallet::storage]
+	/// Are mixnode registrations for the next session closed yet?
+	pub(crate) type NextRegistrationsClosed<T> = StorageValue<_, bool, ValueQuery>;
+
+	#[pallet::storage]
 	/// Mixnode set. Active during even sessions (0, 2, ...). Built during odd sessions.
-	pub(crate) type EvenSessionMixnodes<T> = StorageMap<_, Identity, AuthorityIndex, KxPublic>;
+	pub(crate) type EvenSessionMixnodes<T> =
+		StorageMap<_, Identity, AuthorityIndex, BoundedOpaqueMixnodeFor<T>>;
 
 	#[pallet::storage]
 	/// Mixnode set. Active during odd sessions (1, 3, ...). Built during even sessions.
-	pub(crate) type OddSessionMixnodes<T> = StorageMap<_, Identity, AuthorityIndex, KxPublic>;
+	pub(crate) type OddSessionMixnodes<T> =
+		StorageMap<_, Identity, AuthorityIndex, BoundedOpaqueMixnodeFor<T>>;
 
 	#[pallet::genesis_config]
 	pub struct GenesisConfig<T: Config> {
-		pub mixnodes: BoundedVec<Mixnode, T::MaxAuthorities>,
+		pub mixnodes: BoundedVec<(AuthorityIndex, BoundedOpaqueMixnodeFor<T>), T::MaxAuthorities>,
 	}
 
 	#[cfg(feature = "std")]
@@ -193,8 +286,8 @@ pub mod pallet {
 				OddSessionMixnodes::<T>::iter().next().is_none(),
 				"Odd session mixnode set should be empty in genesis block"
 			);
-			for mixnode in &self.mixnodes {
-				EvenSessionMixnodes::<T>::insert(mixnode.authority_index, mixnode.kx_public);
+			for (authority_index, mixnode) in &self.mixnodes {
+				EvenSessionMixnodes::<T>::insert(authority_index, mixnode);
 			}
 		}
 	}
@@ -204,21 +297,25 @@ pub mod pallet {
 		#[pallet::weight(1)] // TODO
 		pub fn register(
 			origin: OriginFor<T>,
-			registration: Registration<T::BlockNumber>,
+			registration: RegistrationFor<T>,
 			_signature: AuthoritySignature,
 		) -> DispatchResult {
 			ensure_none(origin)?;
 
 			// Checked by ValidateUnsigned
 			debug_assert_eq!(registration.session_index, T::ValidatorSet::session_index());
+			debug_assert!(!NextRegistrationsClosed::<T>::get());
 			debug_assert!(registration.authority_index < T::MaxAuthorities::get());
 
 			// Note we are registering for the _following_ session, so the if appears to be
 			// backwards...
 			if (registration.session_index & 1) == 0 {
-				OddSessionMixnodes::<T>::insert(registration.authority_index, registration.kx_public);
+				OddSessionMixnodes::<T>::insert(registration.authority_index, registration.mixnode);
 			} else {
-				EvenSessionMixnodes::<T>::insert(registration.authority_index, registration.kx_public);
+				EvenSessionMixnodes::<T>::insert(
+					registration.authority_index,
+					registration.mixnode,
+				);
 			}
 
 			Ok(())
@@ -231,14 +328,16 @@ pub mod pallet {
 
 		fn validate_unsigned(_source: TransactionSource, call: &Self::Call) -> TransactionValidity {
 			if let Self::Call::register { registration, signature } = call {
-				// Check session index matches
-				if registration.session_index != T::ValidatorSet::session_index() {
-					return InvalidTransaction::Stale.into();
+				// Check session index matches and registrations are still open
+				if (registration.session_index != T::ValidatorSet::session_index()) ||
+					NextRegistrationsClosed::<T>::get()
+				{
+					return InvalidTransaction::Stale.into()
 				}
 
 				// Check authority index is valid
 				if registration.authority_index >= T::MaxAuthorities::get() {
-					return InvalidTransaction::BadProof.into();
+					return InvalidTransaction::BadProof.into()
 				}
 				let authority_id = match NextAuthorityIds::<T>::get(registration.authority_index) {
 					Some(id) => id,
@@ -250,7 +349,7 @@ pub mod pallet {
 					registration.session_index,
 					registration.authority_index,
 				) {
-					return InvalidTransaction::Stale.into();
+					return InvalidTransaction::Stale.into()
 				}
 
 				// Check signature
@@ -258,7 +357,7 @@ pub mod pallet {
 					authority_id.verify(&encoded_registration, signature)
 				});
 				if !signature_ok {
-					return InvalidTransaction::BadProof.into();
+					return InvalidTransaction::BadProof.into()
 				}
 
 				ValidTransaction::with_tag_prefix("Mixnet")
@@ -284,12 +383,29 @@ pub mod pallet {
 
 	#[pallet::hooks]
 	impl<T: Config> Hooks<T::BlockNumber> for Pallet<T> {
+		fn on_finalize(block_number: T::BlockNumber) {
+			let progress = if let (Some(progress), _weight) =
+				T::NextSessionRotation::estimate_current_session_progress(block_number)
+			{
+				progress
+			} else {
+				// If we can't estimate session progress, registrations will never close early.
+				// Things will still work, just possibly not as smoothly.
+				return
+			};
+
+			if progress >= T::CloseRegistrationsAt::get() {
+				NextRegistrationsClosed::<T>::put(true);
+			}
+		}
+
 		fn offchain_worker(block_number: T::BlockNumber) {
-            // If this node is not running as a validator, never try to register as a mixnode...
+			// If the local node is not running as a validator, never try to register as a
+			// mixnode...
 			if sp_io::offchain::is_validator() {
-				if let Err(err) = Self::maybe_register_this_node(block_number) {
+				if let Err(err) = Self::maybe_register_local_node(block_number) {
 					log::debug!(target: "runtime::mixnet",
-						"Mixnet registration at {:?}: {:?}", block_number, err);
+						"Mixnet registration at {:?}: {}", block_number, err);
 				}
 			}
 		}
@@ -303,17 +419,33 @@ fn random_u64() -> u64 {
 }
 
 impl<T: Config> Pallet<T> {
-	pub fn current_mixnodes() -> Vec<Mixnode> {
-		let iter = if (T::ValidatorSet::session_index() & 1) == 0 {
-			EvenSessionMixnodes::<T>::iter()
-		} else {
-			OddSessionMixnodes::<T>::iter()
-		};
-		iter.map(|(authority_index, kx_public)| Mixnode { authority_index, kx_public }).collect()
+	pub fn session_status() -> SessionStatus {
+		SessionStatus {
+			current_index: T::ValidatorSet::session_index(),
+			next_registrations_closed: NextRegistrationsClosed::<T>::get(),
+		}
 	}
 
-	/// Is it ok to register this node now, considering only session progress?
-	fn ok_to_register_by_session_progress(block_number: T::BlockNumber) -> bool {
+	fn mixnodes(next: bool) -> Vec<OpaqueMixnode> {
+		if (T::ValidatorSet::session_index() & 1) == (next as u32) {
+			EvenSessionMixnodes::<T>::iter_values()
+		} else {
+			OddSessionMixnodes::<T>::iter_values()
+		}
+		.map(Into::into)
+		.collect()
+	}
+
+	pub fn current_mixnodes() -> Vec<OpaqueMixnode> {
+		Self::mixnodes(false)
+	}
+
+	pub fn next_mixnodes() -> Vec<OpaqueMixnode> {
+		Self::mixnodes(true)
+	}
+
+	/// Is now a good time to register the local node, considering only session progress?
+	fn should_register_by_session_progress(block_number: T::BlockNumber) -> bool {
 		let progress = if let (Some(progress), _weight) =
 			T::NextSessionRotation::estimate_current_session_progress(block_number)
 		{
@@ -321,24 +453,25 @@ impl<T: Config> Pallet<T> {
 		} else {
 			// Things aren't going to work terribly well in this case as all the authorities will
 			// just pile in at the start of each session...
-			return true;
+			return true
 		};
 
 		// Don't try to register right at the start of a session; any nodes that aren't in the new
 		// session yet will reject our registration transaction
-		const BEGIN: Permill = Permill::from_percent(5);
-		// Leave some time at the end of the session for registrations to make it on to the chain
-		const END: Permill = Permill::from_percent(80);
+		let begin = Permill::from_percent(5) * T::CloseRegistrationsAt::get();
+		// Leave some time before registrations close; if we're too close our registration might not
+		// make it on to the chain in time
+		let end = Permill::from_percent(80) * T::CloseRegistrationsAt::get();
 
-		if progress < BEGIN {
-			return false;
+		if progress < begin {
+			return false
 		}
-		if progress >= END {
-			return true;
+		if progress >= end {
+			return true
 		}
 
 		let session_length = T::NextSessionRotation::average_session_length();
-		let remaining_blocks = (END - progress).mul_ceil(session_length);
+		let remaining_blocks = (end - progress).mul_ceil(session_length);
 		// Want uniform distribution over the remaining blocks, so pick this block with probability
 		// 1/remaining_blocks. This is slightly biased as remaining_blocks most likely won't divide
 		// into 2^64, but it doesn't really matter...
@@ -379,17 +512,14 @@ impl<T: Config> Pallet<T> {
 				StorageRetrievalError,
 			>| {
 				match prev_attempt {
-					Ok(Some(prev_attempt)) if !prev_attempt.ok_to_replace_with(&attempt) => {
-						Err(OffchainErr::WaitingForInclusion(prev_attempt.block_number))
-					},
+					Ok(Some(prev_attempt)) if !prev_attempt.ok_to_replace_with(&attempt) =>
+						Err(OffchainErr::WaitingForInclusion(prev_attempt.block_number)),
 					_ => Ok(attempt),
 				}
 			},
 		) {
 			Ok(_) => (),
-			Err(MutateStorageError::ConcurrentModification(_)) => {
-				return Err(OffchainErr::LostRace)
-			},
+			Err(MutateStorageError::ConcurrentModification(_)) => return Err(OffchainErr::LostRace),
 			Err(MutateStorageError::ValueFunctionFailed(err)) => return Err(err),
 		}
 
@@ -400,10 +530,38 @@ impl<T: Config> Pallet<T> {
 		res
 	}
 
-	fn maybe_register_this_node(block_number: T::BlockNumber) -> OffchainResult<T, ()> {
-		if !Self::ok_to_register_by_session_progress(block_number) {
-			// Don't want to register this node right now
-			return Err(OffchainErr::WaitingForSessionProgress);
+	fn local_mixnode(session_index: SessionIndex) -> OffchainResult<T, BoundedOpaqueMixnodeFor<T>> {
+		let kx_public = sp_io::mixnet_kx_public_store::public_for_session(session_index)
+			.map_err(OffchainErr::KxPublicForSessionFailed)?;
+
+		let network_state =
+			sp_io::offchain::network_state().map_err(|_| OffchainErr::NetworkStateFailed)?;
+		let peer_id = network_state.peer_id.0.try_into().map_err(|_| OffchainErr::PeerIdTooBig)?;
+		if network_state.external_addresses.is_empty() {
+			return Err(OffchainErr::NoMultiaddrs)
+		}
+		let external_addresses: BoundedVec<_, _> = network_state
+			.external_addresses
+			.into_iter()
+			.flat_map(|multiaddr| multiaddr.0.try_into().ok())
+			.take(T::MaxMultiaddrsPerMixnode::get() as usize)
+			.collect::<Vec<_>>()
+			.try_into()
+			.expect("Excess multiaddrs discarded with take()");
+		if external_addresses.is_empty() {
+			return Err(OffchainErr::MultiaddrsTooBig)
+		}
+
+		Ok(BoundedOpaqueMixnode { kx_public, peer_id, external_addresses })
+	}
+
+	fn maybe_register_local_node(block_number: T::BlockNumber) -> OffchainResult<T, ()> {
+		if NextRegistrationsClosed::<T>::get() {
+			return Err(OffchainErr::RegistrationsClosed)
+		}
+		if !Self::should_register_by_session_progress(block_number) {
+			// Don't want to register the local node right now
+			return Err(OffchainErr::WaitingForSessionProgress)
 		}
 
 		let (authority_index, authority_id) = if let Some(authority) = Self::next_local_authority()
@@ -411,13 +569,13 @@ impl<T: Config> Pallet<T> {
 			authority
 		} else {
 			// Not an authority in the next session
-			return Err(OffchainErr::NotAnAuthority);
+			return Err(OffchainErr::NotAnAuthority)
 		};
 
 		let session_index = T::ValidatorSet::session_index();
 		if Self::already_registered(session_index, authority_index) {
-			// Registration for this node already on the chain
-			return Err(OffchainErr::AlreadyRegistered);
+			// Registration for the local node already on the chain
+			return Err(OffchainErr::AlreadyRegistered)
 		}
 
 		let attempt = RegistrationAttempt {
@@ -427,14 +585,9 @@ impl<T: Config> Pallet<T> {
 			authority_id: authority_id.clone(),
 		};
 		Self::with_recorded_registration_attempt(attempt, || {
-			let kx_public = sp_io::mixnet_kx_public_store::public_for_session(session_index)
-				.map_err(OffchainErr::KxPublicForSessionFailed)?;
-			let registration = Registration::<T::BlockNumber> {
-				block_number,
-				session_index,
-				authority_index,
-				kx_public,
-			};
+			let mixnode = Self::local_mixnode(session_index)?;
+			let registration =
+				Registration { block_number, session_index, authority_index, mixnode };
 			let signature =
 				authority_id.sign(&registration.encode()).ok_or(OffchainErr::SigningFailed)?;
 			let call = Call::register { registration, signature };
@@ -472,13 +625,16 @@ impl<T: Config> OneSessionHandler<T::AccountId> for Pallet<T> {
 	where
 		I: Iterator<Item = (&'a T::AccountId, Self::Key)>,
 	{
-        // Clear mixnode set for the _following_ session. Note that we do this even if the
-        // validator set is not going to change; the key-exchange public keys are still rotated.
+		// Clear mixnode set for the _following_ session. Note that we do this even if the
+		// validator set is not going to change; the key-exchange public keys are still rotated.
 		if (T::ValidatorSet::session_index() & 1) == 0 {
 			check_removed_all(OddSessionMixnodes::<T>::clear(T::MaxAuthorities::get(), None));
 		} else {
 			check_removed_all(EvenSessionMixnodes::<T>::clear(T::MaxAuthorities::get(), None));
 		}
+
+		// Re-open registrations
+		NextRegistrationsClosed::<T>::kill();
 
 		if changed {
 			// Save authority set for the next session. Note that we don't care about the authority

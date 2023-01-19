@@ -1,4 +1,3 @@
-This pallet is responsible for determining the current set of mixnodes and
-collecting their key-exchange public keys.
+This pallet is responsible for determining the mixnode set for each session.
 
 License: Apache-2.0
