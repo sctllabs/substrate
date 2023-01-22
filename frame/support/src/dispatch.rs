@@ -48,11 +48,17 @@ pub use sp_weights::Weight;
 /// returned from a dispatch.
 pub type DispatchResultWithPostInfo = sp_runtime::DispatchResultWithInfo<PostDispatchInfo>;
 
+/// Blub
+pub type DispatchValueWithPostInfo<T> = Result<RetVal<T>, DispatchErrorWithPostInfo>;
+
 /// Unaugmented version of `DispatchResultWithPostInfo` that can be returned from
 /// dispatchable functions and is automatically converted to the augmented type. Should be
 /// used whenever the `PostDispatchInfo` does not need to be overwritten. As this should
 /// be the common case it is the implicit return type when none is specified.
 pub type DispatchResult = Result<(), sp_runtime::DispatchError>;
+
+/// Blub
+pub type DispatchValue<T> = Result<T, sp_runtime::DispatchError>;
 
 /// The error type contained in a `DispatchResultWithPostInfo`.
 pub type DispatchErrorWithPostInfo = sp_runtime::DispatchErrorWithPostInfo<PostDispatchInfo>;
@@ -127,6 +133,17 @@ impl Default for Pays {
 impl From<Pays> for PostDispatchInfo {
 	fn from(pays_fee: Pays) -> Self {
 		Self { actual_weight: None, pays_fee }
+	}
+}
+
+pub struct RetVal<T: Encode> {
+	pub value: T,
+	pub post_info: PostDispatchInfo,
+}
+
+impl<P: Into<PostDispatchInfo>> From<P> for RetVal<Vec<u8>> {
+	fn from(post_info: P) -> Self {
+		Self { value: Vec::new(), post_info: post_info.into() }
 	}
 }
 

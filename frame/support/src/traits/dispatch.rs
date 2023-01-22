@@ -17,7 +17,9 @@
 
 //! Traits for dealing with dispatching calls and the origin from which they are dispatched.
 
-use crate::dispatch::{DispatchResultWithPostInfo, Parameter, RawOrigin};
+use crate::dispatch::{
+	DispatchResultWithPostInfo, DispatchValueWithPostInfo, Parameter, RawOrigin,
+};
 use codec::MaxEncodedLen;
 use sp_runtime::{
 	traits::{BadOrigin, Get, Member, Morph, TryMorph},
@@ -320,6 +322,12 @@ pub trait UnfilteredDispatchable {
 
 	/// Dispatch this call but do not check the filter in origin.
 	fn dispatch_bypass_filter(self, origin: Self::RuntimeOrigin) -> DispatchResultWithPostInfo;
+
+	/// Evaluate (collect return value) this call but do not check the filter in origin.
+	fn evaluate_bypass_filter(
+		self,
+		origin: Self::RuntimeOrigin,
+	) -> DispatchValueWithPostInfo<Vec<u8>>;
 }
 
 /// The trait implemented by the overarching enumeration of the different pallets' origins.

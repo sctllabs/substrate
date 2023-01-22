@@ -16,7 +16,7 @@
 // limitations under the License.
 
 use quote::ToTokens;
-use syn::spanned::Spanned;
+use syn::{spanned::Spanned, AngleBracketedGenericArguments};
 
 /// List of additional token to be used for parsing.
 mod keyword {
@@ -29,6 +29,8 @@ mod keyword {
 	syn::custom_keyword!(origin);
 	syn::custom_keyword!(DispatchResult);
 	syn::custom_keyword!(DispatchResultWithPostInfo);
+	syn::custom_keyword!(DispatchValue);
+	syn::custom_keyword!(DispatchValueWithPostInfo);
 }
 
 /// A usage of instance, either the trait `Config` has been used with instance or without instance.
@@ -582,23 +584,33 @@ pub fn check_type_value_gen(
 	Ok(i)
 }
 
-/// Check the keyword `DispatchResultWithPostInfo` or `DispatchResult`.
-pub fn check_pallet_call_return_type(type_: &syn::Type) -> syn::Result<()> {
-	pub struct Checker;
+/// Check that it uses one of the allowed return types.
+///
+/// Returns `true` if this type allows returning data on `Ok`.
+pub fn check_pallet_call_return_type(type_: &syn::Type) -> syn::Result<bool> {
+	pub struct Checker(bool);
 	impl syn::parse::Parse for Checker {
 		fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
 			let lookahead = input.lookahead1();
 			if lookahead.peek(keyword::DispatchResultWithPostInfo) {
 				input.parse::<keyword::DispatchResultWithPostInfo>()?;
-				Ok(Self)
+				Ok(Self(false))
 			} else if lookahead.peek(keyword::DispatchResult) {
 				input.parse::<keyword::DispatchResult>()?;
-				Ok(Self)
+				Ok(Self(false))
+			} else if lookahead.peek(keyword::DispatchValue) {
+				input.parse::<keyword::DispatchValue>()?;
+				input.parse::<AngleBracketedGenericArguments>()?;
+				Ok(Self(true))
+			} else if lookahead.peek(keyword::DispatchValueWithPostInfo) {
+				input.parse::<keyword::DispatchValueWithPostInfo>()?;
+				input.parse::<AngleBracketedGenericArguments>()?;
+				Ok(Self(true))
 			} else {
 				Err(lookahead.error())
 			}
 		}
 	}
 
-	syn::parse2::<Checker>(type_.to_token_stream()).map(|_| ())
+	syn::parse2::<Checker>(type_.to_token_stream()).map(|checker| checker.0)
 }

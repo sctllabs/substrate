@@ -1387,8 +1387,8 @@ pub mod pallet_prelude {
 	pub use crate::traits::GenesisBuild;
 	pub use crate::{
 		dispatch::{
-			DispatchClass, DispatchError, DispatchResult, DispatchResultWithPostInfo, Parameter,
-			Pays,
+			DispatchClass, DispatchError, DispatchErrorWithPostInfo, DispatchResult,
+			DispatchResultWithPostInfo, DispatchValue, Parameter, Pays, RetVal,
 		},
 		ensure,
 		inherent::{InherentData, InherentIdentifier, ProvideInherent},

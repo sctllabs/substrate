@@ -324,6 +324,8 @@ pub fn expand_call(def: &mut Def) -> proc_macro2::TokenStream {
 			}
 		}
 
+
+
 		impl<#type_impl_gen> #frame_support::traits::UnfilteredDispatchable
 			for #call_ident<#type_use_gen>
 			#where_clause
@@ -333,6 +335,28 @@ pub fn expand_call(def: &mut Def) -> proc_macro2::TokenStream {
 				self,
 				origin: Self::RuntimeOrigin
 			) -> #frame_support::dispatch::DispatchResultWithPostInfo {
+				match self {
+					#(
+						Self::#fn_name { #( #args_name_pattern, )* } => {
+							#frame_support::sp_tracing::enter_span!(
+								#frame_support::sp_tracing::trace_span!(stringify!(#fn_name))
+							);
+							#maybe_allow_attrs
+							<#pallet_ident<#type_use_gen>>::#fn_name(origin, #( #args_name, )* )
+								.map(|_| Default::default()).map_err(Into::into)
+						},
+					)*
+					Self::__Ignore(_, _) => {
+						let _ = origin; // Use origin for empty Call enum
+						unreachable!("__PhantomItem cannot be used.");
+					},
+				}
+			}
+
+			fn evaluate_bypass_filter(
+				self,
+				origin: Self::RuntimeOrigin
+			) -> #frame_support::dispatch::DispatchValueWithPostInfo<Vec<u8>> {
 				match self {
 					#(
 						Self::#fn_name { #( #args_name_pattern, )* } => {

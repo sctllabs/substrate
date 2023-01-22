@@ -65,6 +65,8 @@ pub struct CallVariantDef {
 	pub docs: Vec<syn::Lit>,
 	/// Attributes annotated at the top of the dispatchable function.
 	pub attrs: Vec<syn::Attribute>,
+	/// A dispatchable that returns a value on `Ok` different than `()`.
+	pub returns_value: bool,
 }
 
 /// Attributes for functions in call impl block.
@@ -201,13 +203,13 @@ impl CallDef {
 					},
 				}
 
-				if let syn::ReturnType::Type(_, type_) = &method.sig.output {
-					helper::check_pallet_call_return_type(type_)?;
+				let returns_value = if let syn::ReturnType::Type(_, type_) = &method.sig.output {
+					helper::check_pallet_call_return_type(type_)?
 				} else {
 					let msg = "Invalid pallet::call, require return type \
 						DispatchResultWithPostInfo";
 					return Err(syn::Error::new(method.sig.span(), msg))
-				}
+				};
 
 				let (mut weight_attrs, mut call_idx_attrs): (Vec<FunctionAttr>, Vec<FunctionAttr>) =
 					helper::take_item_pallet_attrs(&mut method.attrs)?.into_iter().partition(
@@ -307,6 +309,7 @@ impl CallDef {
 					args,
 					docs,
 					attrs: method.attrs.clone(),
+					returns_value,
 				});
 			} else {
 				let msg = "Invalid pallet::call, only method accepted";

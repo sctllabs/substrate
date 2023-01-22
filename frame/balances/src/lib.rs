@@ -426,14 +426,14 @@ pub mod pallet {
 			origin: OriginFor<T>,
 			dest: AccountIdLookupOf<T>,
 			keep_alive: bool,
-		) -> DispatchResult {
+		) -> DispatchValue<u32> {
 			use fungible::Inspect;
 			let transactor = ensure_signed(origin)?;
 			let reducible_balance = Self::reducible_balance(&transactor, keep_alive);
 			let dest = T::Lookup::lookup(dest)?;
 			let keep_alive = if keep_alive { KeepAlive } else { AllowDeath };
 			<Self as Currency<_>>::transfer(&transactor, &dest, reducible_balance, keep_alive)?;
-			Ok(())
+			Ok(7)
 		}
 
 		/// Unreserve some balance from a user by force.
