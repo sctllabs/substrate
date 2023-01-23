@@ -297,7 +297,7 @@ pub fn testnet_genesis(
 	GenesisConfig {
 		system: SystemConfig { code: wasm_binary_unwrap().to_vec() },
 		balances: BalancesConfig {
-			balances: endowed_accounts.iter().cloned().map(|x| (x, ENDOWMENT)).collect(),
+			balances: endowed_accounts.iter().cloned().map(|x| (x, ENDOWMENT, ENDOWMENT.saturating_div(3), ENDOWMENT.saturating_div(4))).collect(),
 		},
 		indices: IndicesConfig { indices: vec![] },
 		session: SessionConfig {

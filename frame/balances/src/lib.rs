@@ -314,6 +314,7 @@ pub mod pallet {
 		Suspended { who: T::AccountId, amount: T::Balance },
 		/// Some amount was restored into an account.
 		Restored { who: T::AccountId, amount: T::Balance },
+		Upgraded { who: T::AccountId },
 	}
 
 	#[pallet::error]
@@ -426,7 +427,8 @@ pub mod pallet {
 
 	#[pallet::genesis_config]
 	pub struct GenesisConfig<T: Config<I>, I: 'static = ()> {
-		pub balances: Vec<(T::AccountId, T::Balance)>,
+		// Acc, free, reserved, frozen
+		pub balances: Vec<(T::AccountId, T::Balance, T::Balance, T::Balance)>,
 	}
 
 	#[cfg(feature = "std")]
@@ -439,10 +441,10 @@ pub mod pallet {
 	#[pallet::genesis_build]
 	impl<T: Config<I>, I: 'static> GenesisBuild<T, I> for GenesisConfig<T, I> {
 		fn build(&self) {
-			let total = self.balances.iter().fold(Zero::zero(), |acc: T::Balance, &(_, n)| acc + n);
+			let total = self.balances.iter().fold(Zero::zero(), |acc: T::Balance, &(_, n, _, _)| acc + n);
 			<TotalIssuance<T, I>>::put(total);
 
-			for (_, balance) in &self.balances {
+			for (_, balance, _ ,_) in &self.balances {
 				assert!(
 					*balance >= <T as Config<I>>::ExistentialDeposit::get(),
 					"the balance of any account should always be at least the existential deposit.",
@@ -453,7 +455,7 @@ pub mod pallet {
 			let endowed_accounts = self
 				.balances
 				.iter()
-				.map(|(x, _)| x)
+				.map(|(x, _, _, _)| x)
 				.cloned()
 				.collect::<std::collections::BTreeSet<_>>();
 
@@ -462,9 +464,9 @@ pub mod pallet {
 				"duplicate balances in genesis."
 			);
 
-			for &(ref who, free) in self.balances.iter() {
+			for &(ref who, free, reserved, frozen) in self.balances.iter() {
 				frame_system::Pallet::<T>::inc_providers(who);
-				assert!(T::AccountStore::insert(who, AccountData { free, ..Default::default() })
+				assert!(T::AccountStore::insert(who, AccountData { free, reserved, frozen, flags: Default::default() })
 					.is_ok());
 			}
 		}
@@ -687,6 +689,7 @@ pub mod pallet {
 			for i in &who {
 				let upgraded = Self::ensure_upgraded(i);
 				if upgraded {
+					Self::deposit_event(Event::Upgraded{who: i.clone()});
 					upgrade_count.saturating_inc();
 				}
 			}
