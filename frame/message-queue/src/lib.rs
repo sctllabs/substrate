@@ -194,7 +194,7 @@ use frame_support::{
 	defensive,
 	pallet_prelude::*,
 	traits::{
-		DefensiveTruncateFrom, EnqueueMessage, ExecuteOverweightError, Footprint, ProcessMessage,
+		DefensiveTruncateFrom, EnqueueMessage, ExecuteOverweightError, Footprint, ProcessMessage, OnQueueChanged,
 		ProcessMessageError, ServiceQueues,
 	},
 	BoundedSlice, CloneNoBound, DefaultNoBound,
@@ -248,6 +248,8 @@ pub struct Page<Size: Into<u32> + Debug + Clone + Default, HeapSize: Get<Size>> 
 	/// The heap. If `self.offset == self.heap.len()` then the page is empty and should be deleted.
 	heap: BoundedVec<u8, IntoU32<HeapSize, Size>>,
 }
+
+const LOG_TARGET: &'static str = "runtime::message-queue";
 
 impl<
 		Size: BaseArithmetic + Unsigned + Copy + Into<u32> + Codec + MaxEncodedLen + Debug + Default,
@@ -423,14 +425,16 @@ impl<MessageOrigin> Default for BookState<MessageOrigin> {
 	}
 }
 
-/// Handler code for when the items in a queue change.
-pub trait OnQueueChanged<Id> {
-	/// Note that the queue `id` now has `item_count` items in it, taking up `items_size` bytes.
-	fn on_queue_changed(id: Id, items_count: u64, items_size: u64);
-}
+impl<T: Config> frame_support::traits::QueueIntrospect<MessageOriginOf<T>> for Pallet<T> {
+	type MaxMessageLen = MaxMessageLenOf<T>;
 
-impl<Id> OnQueueChanged<Id> for () {
-	fn on_queue_changed(_: Id, _: u64, _: u64) {}
+	fn messages(
+		_origin: MessageOriginOf<T>,
+	) -> Result<Vec<BoundedVec<u8, Self::MaxMessageLen>>, ()> {
+		#[cfg(std)] // Lets make sure we don't accidentally alter storage.
+		let _guard = frame_support::StorageNoopGuard::new();
+		Ok(Vec::new())
+	}
 }
 
 #[frame_support::pallet]
@@ -560,8 +564,10 @@ pub mod pallet {
 	impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
 		fn on_initialize(_n: BlockNumberFor<T>) -> Weight {
 			if let Some(weight_limit) = T::ServiceWeight::get() {
+				log::warn!(target: LOG_TARGET, "on_init: weight {}", weight_limit);
 				Self::service_queues(weight_limit)
 			} else {
+				log::warn!(target: LOG_TARGET, "on_init: not enough weight");
 				Weight::zero()
 			}
 		}
@@ -741,6 +747,11 @@ impl<T: Config> Pallet<T> {
 			.size
 			// This should be payload size, but here the payload *is* the message.
 			.saturating_accrue(message.len() as u64);
+		log::warn!(
+			target: LOG_TARGET,
+			"Enqueuing message of size {} bytes",
+			message.len(),
+		);
 
 		if book_state.end > book_state.begin {
 			debug_assert!(book_state.ready_neighbours.is_some(), "Must be in ready ring if ready");

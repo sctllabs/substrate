@@ -121,6 +121,7 @@ benchmarks! {
 		for i in 0 .. T::MaxDeposits::get() - 2 {
 			let seconder = funded_account::<T>("seconder", i);
 			Democracy::<T>::second(RawOrigin::Signed(seconder).into(), 0)?;
+			return 0;
 		}
 
 		let deposits = Democracy::<T>::deposit_of(0).ok_or("Proposal not created")?;

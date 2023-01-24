@@ -85,6 +85,15 @@ pub trait ServiceQueues {
 	}
 }
 
+pub struct NoopServiceQueues<OverweightAddr>(PhantomData<OverweightAddr>);
+impl<OverweightAddr> ServiceQueues for NoopServiceQueues<OverweightAddr> {
+	type OverweightMessageAddress = OverweightAddr;
+	
+	fn service_queues(_: Weight) -> Weight {
+		Weight::zero()
+	}
+}
+
 /// The resource footprint of a queue.
 #[derive(Default, Copy, Clone, Eq, PartialEq, RuntimeDebug)]
 pub struct Footprint {
@@ -199,4 +208,30 @@ where
 	fn footprint() -> Footprint {
 		E::footprint(O::get())
 	}
+}
+
+/// Can be used to gain information about the messages in a queue.
+///
+/// The PoV consumption of this can be arbitrarily large. Should only be used in context where this
+/// is not an issue. For example runtime-APIs.
+pub trait QueueIntrospect<O: MaxEncodedLen> {
+	type MaxMessageLen: Get<u32>;
+
+	// FAIL-CI maybe filter by `processed` or something
+	fn messages(origin: O) -> Result<Vec<crate::BoundedVec<u8, Self::MaxMessageLen>>, ()>;
+}
+
+pub trait QueueManager<O: MaxEncodedLen> {
+	fn remove(origin: O, force: bool);
+}
+
+/// Handler code for when the items in a queue change.
+pub trait OnQueueChanged<Id> {
+	/// Note that the queue `id` now has `item_count` items in it, taking up `items_size` bytes.
+	fn on_queue_changed(id: Id, items_count: u64, items_size: u64);
+}
+
+impl<Id> OnQueueChanged<Id> for () {
+	// FAIL-CI try use &Id
+	fn on_queue_changed(_: Id, _: u64, _: u64) {}
 }

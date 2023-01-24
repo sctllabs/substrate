@@ -48,16 +48,18 @@ impl From<u32> for MessageOrigin {
 }
 
 /// Processes any message and consumes (1, 1) weight per message.
-pub struct NoopMessageProcessor;
-impl ProcessMessage for NoopMessageProcessor {
-	type Origin = MessageOrigin;
+pub struct NoopMessageProcessor<Origin>(PhantomData<Origin>);
+impl<Origin> ProcessMessage for NoopMessageProcessor<Origin>
+where Origin: codec::FullCodec + MaxEncodedLen + Clone + Eq + PartialEq + TypeInfo + Debug{
+	type Origin = Origin;
 
 	fn process_message(
 		_message: &[u8],
-		_origin: Self::Origin,
+		origin: Self::Origin,
 		weight_limit: Weight,
 	) -> Result<(bool, Weight), ProcessMessageError> {
 		let weight = Weight::from_parts(1, 1);
+		log::warn!("Processing message from {:?}", origin);
 
 		if weight.all_lte(weight_limit) {
 			Ok((true, weight))

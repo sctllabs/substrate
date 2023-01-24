@@ -49,7 +49,7 @@ macro_rules! defensive {
 		);
 		debug_assert!(false, "{}", $crate::traits::DEFENSIVE_OP_INTERNAL_ERROR);
 	};
-	($error:tt) => {
+	($error:expr $(,)?) => {
 		frame_support::log::error!(
 			target: "runtime",
 			"{}: {:?}",
@@ -58,7 +58,7 @@ macro_rules! defensive {
 		);
 		debug_assert!(false, "{}: {:?}", $crate::traits::DEFENSIVE_OP_INTERNAL_ERROR, $error);
 	};
-	($error:tt, $proof:tt) => {
+	($error:expr, $proof:expr $(,)?) => {
 		frame_support::log::error!(
 			target: "runtime",
 			"{}: {:?}: {:?}",
@@ -68,6 +68,15 @@ macro_rules! defensive {
 		);
 		debug_assert!(false, "{}: {:?}: {:?}", $crate::traits::DEFENSIVE_OP_INTERNAL_ERROR, $error, $proof);
 	}
+}
+
+#[macro_export]
+macro_rules! defensive_assert {
+	($cond:expr $(, $proof:expr )? $(,)?) => {
+		if !($cond) {
+			defensive!(stringify!($cond) $(, $proof )?);
+		}
+	};
 }
 
 /// Prelude module for all defensive traits to be imported at once.
@@ -1140,6 +1149,29 @@ mod test {
 	use super::*;
 	use sp_core::bounded::{BoundedSlice, BoundedVec};
 	use sp_std::marker::PhantomData;
+
+	#[test]
+	fn defensive_assert_works() {
+		defensive_assert!(true);
+		defensive_assert!(true,);
+		defensive_assert!(true, "must work",);
+		defensive_assert!(true, "must work");
+	}
+
+	#[test]
+	#[cfg(debug_assertions)]
+	#[should_panic(expected = "Defensive failure has been triggered!: \"var == 1\": \"must work\"")]
+	fn defensive_assert_panics() {
+		let var = 0;
+		defensive_assert!(var == 1, "must work");
+	}
+
+	#[test]
+	#[cfg(not(debug_assertions))]
+	fn defensive_assert_does_not_panic() {
+		let var = 0;
+		defensive_assert!(var == 1, "must work");
+	}
 
 	#[test]
 	#[cfg(not(debug_assertions))]
