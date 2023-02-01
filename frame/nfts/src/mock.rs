@@ -58,7 +58,7 @@ impl frame_system::Config for Test {
 	type BlockNumber = u64;
 	type Hash = H256;
 	type Hashing = BlakeTwo256;
-	type AccountId = u64;
+	type AccountId = [u8; 32];
 	type Lookup = IdentityLookup<Self::AccountId>;
 	type Header = Header;
 	type RuntimeEvent = RuntimeEvent;
@@ -115,6 +115,9 @@ impl Config for Test {
 	type MaxDeadlineDuration = ConstU64<10000>;
 	type MaxAttributesPerCall = ConstU32<2>;
 	type Features = Features;
+	type OffchainSignature = MultiSignature;
+	// Offchain = Onchain account - no conversion needed.
+	type OffchainAccount = AccountId;
 	type WeightInfo = ();
 	#[cfg(feature = "runtime-benchmarks")]
 	type Helper = ();

@@ -179,9 +179,9 @@ pub mod pallet {
 		/// Off-Chain signature type.
 		///
 		/// Must be possible to verify that a [Config::PK] created a signature.
-		type Signature: Verify<Signer = Self::OffchainAccount> + Parameter;
+		type OffchainSignature: Verify<Signer = Self::OffchainAccount> + Parameter;
 
-		type OffchainAccount: IdentifyAccount<AccountId = Self::AccountId> + Parameter;
+		type OffchainAccount: IdentifyAccount<AccountId = Self::AccountId>;
 
 		#[cfg(feature = "runtime-benchmarks")]
 		/// A set of helper functions for benchmarking.
@@ -1813,17 +1813,16 @@ pub mod pallet {
 		pub fn mint_pre_signed(
 			origin: OriginFor<T>,
 			data: PreSignedMintOf<T, I>,
-			signature: T::Signature,	// Can be `MultiSignature`
-			signer: T::OffchainAccount, // Can be `MultiSigner`
+			signature: T::OffchainSignature,	// Can be `MultiSignature`
+			signer: T::AccountId,
 		) -> DispatchResult {
 			let origin = ensure_signed(origin)?;
 			let msg = Encode::encode(&data);
-			let signer_acc = signer.into_account();
 			ensure!(
-				signature.verify(&*msg, &signer_acc),
+				signature.verify(&*msg, &signer),
 				Error::<T, I>::WrongSignature
 			);
-			Self::do_mint_pre_signed(origin, data, signer_acc)
+			Self::do_mint_pre_signed(origin, data, signer)
 		}
 	}
 }
