@@ -28,7 +28,7 @@ use sp_core::H256;
 use sp_keystore::{testing::KeyStore, KeystoreExt};
 use sp_runtime::{
 	testing::Header,
-	traits::{BlakeTwo256, IdentityLookup, Verify, IdentifyAccount},
+	traits::{BlakeTwo256, IdentifyAccount, IdentityLookup, Verify},
 	MultiSignature,
 };
 use std::sync::Arc;

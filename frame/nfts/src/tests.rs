@@ -74,12 +74,16 @@ macro_rules! bvec {
 	}
 }
 
-fn attributes(collection: u32) -> Vec<(Option<u32>, AttributeNamespace<AccountIdOf<Test>>, Vec<u8>, Vec<u8>)> {
+fn attributes(
+	collection: u32,
+) -> Vec<(Option<u32>, AttributeNamespace<AccountIdOf<Test>>, Vec<u8>, Vec<u8>)> {
 	let mut s: Vec<_> = Attribute::<Test>::iter_prefix((collection,))
 		.map(|(k, v)| (k.0, k.1, k.2.into(), v.0.into()))
 		.collect();
 	s.sort_by_key(|k: &(Option<u32>, AttributeNamespace<AccountIdOf<Test>>, Vec<u8>, Vec<u8>)| k.0);
-	s.sort_by_key(|k: &(Option<u32>, AttributeNamespace<AccountIdOf<Test>>, Vec<u8>, Vec<u8>)| k.2.clone());
+	s.sort_by_key(|k: &(Option<u32>, AttributeNamespace<AccountIdOf<Test>>, Vec<u8>, Vec<u8>)| {
+		k.2.clone()
+	});
 	s
 }
 
@@ -139,7 +143,7 @@ fn item_config_from_disabled_settings(settings: BitFlags<ItemSetting>) -> ItemCo
 
 #[test]
 fn pre_signed_mints_should_work() {
-	use sp_runtime::{AccountId32, traits::IdentifyAccount};
+	use sp_runtime::{traits::IdentifyAccount, AccountId32};
 
 	new_test_ext().execute_with(|| {
 		let user_1_pair = sp_core::sr25519::Pair::from_string("//Alice", None).unwrap();

@@ -1816,15 +1816,12 @@ pub mod pallet {
 		pub fn mint_pre_signed(
 			origin: OriginFor<T>,
 			data: PreSignedMintOf<T, I>,
-			signature: T::OffchainSignature,	// Can be `MultiSignature`
+			signature: T::OffchainSignature, // Can be `MultiSignature`
 			signer: T::AccountId,
 		) -> DispatchResult {
 			let origin = ensure_signed(origin)?;
 			let msg = Encode::encode(&data);
-			ensure!(
-				signature.verify(&*msg, &signer),
-				Error::<T, I>::WrongSignature
-			);
+			ensure!(signature.verify(&*msg, &signer), Error::<T, I>::WrongSignature);
 			Self::do_mint_pre_signed(origin, data, signer)
 		}
 	}
