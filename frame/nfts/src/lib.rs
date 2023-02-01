@@ -178,7 +178,7 @@ pub mod pallet {
 
 		/// Off-Chain signature type.
 		///
-		/// Must be possible to verify that a [Config::OffchainAccount] created a signature.
+		/// Can verify whether an [Config::AccountId] created a signature.
 		type OffchainSignature: Verify<Signer = Self::OffchainPublic> + Parameter;
 
 		/// Off-Chain public key.
