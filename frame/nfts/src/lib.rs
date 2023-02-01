@@ -176,6 +176,13 @@ pub mod pallet {
 		#[pallet::constant]
 		type Features: Get<PalletFeatures>;
 
+		/// Off-Chain signature type.
+		///
+		/// Must be possible to verify that a [Config::PK] created a signature.
+		type Signature: Verify<Signer = Self::OffchainAccount> + Parameter;
+
+		type OffchainAccount: IdentifyAccount<AccountId = Self::AccountId> + Parameter;
+
 		#[cfg(feature = "runtime-benchmarks")]
 		/// A set of helper functions for benchmarking.
 		type Helper: BenchmarkHelper<Self::CollectionId, Self::ItemId>;
@@ -1806,17 +1813,17 @@ pub mod pallet {
 		pub fn mint_pre_signed(
 			origin: OriginFor<T>,
 			data: PreSignedMintOf<T, I>,
-			signature: MultiSignature,
-			signer: MultiSigner,
+			signature: T::Signature,	// Can be `MultiSignature`
+			signer: T::OffchainAccount, // Can be `MultiSigner`
 		) -> DispatchResult {
 			let origin = ensure_signed(origin)?;
 			let msg = Encode::encode(&data);
+			let signer_acc = signer.into_account();
 			ensure!(
-				signature.verify(&*msg, &signer.clone().into_account()),
+				signature.verify(&*msg, &signer_acc),
 				Error::<T, I>::WrongSignature
 			);
-			let signer_account = Self::signer_to_account(signer)?;
-			Self::do_mint_pre_signed(origin, data, signer_account)
+			Self::do_mint_pre_signed(origin, data, signer_acc)
 		}
 	}
 }

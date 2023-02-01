@@ -32,12 +32,6 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 		Collection::<T, I>::get(collection).map(|i| i.owner)
 	}
 
-	/// Convert signer into account id.
-	pub fn signer_to_account(signer: MultiSigner) -> Result<T::AccountId, DispatchError> {
-		Ok(T::AccountId::decode(&mut signer.into_account().as_ref())
-			.map_err(|_| Error::<T, I>::WrongPublic)?)
-	}
-
 	#[cfg(any(test, feature = "runtime-benchmarks"))]
 	pub fn set_next_id(id: T::CollectionId) {
 		NextCollectionId::<T, I>::set(Some(id));
