@@ -32,7 +32,7 @@ use frame_support::{
 };
 use frame_system::RawOrigin as SystemOrigin;
 use sp_io::crypto::{sr25519_generate, sr25519_sign};
-use sp_runtime::traits::{Bounded, One};
+use sp_runtime::traits::{Bounded, IdentifyAccount, One};
 use sp_std::prelude::*;
 
 use crate::Pallet as Nfts;
@@ -726,7 +726,7 @@ benchmarks_instance_pallet! {
 		let n in 0 .. T::MaxAttributesPerCall::get() as u32;
 		let caller_public = sr25519_generate(0.into(), None);
 		let caller_signer = MultiSigner::Sr25519(caller_public);
-		let caller = Nfts::<T, I>::signer_to_account(caller_signer.clone()).unwrap();
+		let caller = caller_signer.clone().into_account();
 		T::Currency::make_free_balance_be(&caller, DepositBalanceOf::<T, I>::max_value());
 		let caller_lookup = T::Lookup::unlookup(caller.clone());
 
@@ -759,7 +759,7 @@ benchmarks_instance_pallet! {
 		let target: T::AccountId = account("target", 0, SEED);
 		T::Currency::make_free_balance_be(&target, DepositBalanceOf::<T, I>::max_value());
 		frame_system::Pallet::<T>::set_block_number(One::one());
-	}: _(SystemOrigin::Signed(target.clone()), mint_data, signature, caller_signer)
+	}: _(SystemOrigin::Signed(target.clone()), mint_data, signature, caller)
 	verify {
 		let metadata: BoundedVec<_, _> = metadata.try_into().unwrap();
 		assert_last_event::<T, I>(Event::ItemMetadataSet { collection, item, data: metadata }.into());
