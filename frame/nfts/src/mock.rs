@@ -131,8 +131,6 @@ impl Config for Test {
 	type WeightInfo = ();
 	#[cfg(feature = "runtime-benchmarks")]
 	type Helper = ();
-	#[cfg(feature = "runtime-benchmarks")]
-	type SignatureConverter = SignatureConverter;
 }
 
 pub(crate) fn new_test_ext() -> sp_io::TestExternalities {

@@ -754,7 +754,7 @@ benchmarks_instance_pallet! {
 			deadline: One::one(),
 		};
 		let message = Encode::encode(&mint_data);
-		let signature = T::SignatureConverter::convert(MultiSignature::Sr25519(sr25519_sign(0.into(), &pk, &message).unwrap()));
+		let signature = <T::Helper as BenchmarkHelper<_,_,_>>::SignatureConverter::convert(MultiSignature::Sr25519(sr25519_sign(0.into(), &pk, &message).unwrap()));
 
 		let on_chain_sig = T::OffchainSignature::decode(&mut &signature.encode()[..]).unwrap(); // TODO remove
 		let target: T::AccountId = account("target", 0, SEED);
