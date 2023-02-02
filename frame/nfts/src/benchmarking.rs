@@ -724,9 +724,9 @@ benchmarks_instance_pallet! {
 
 	mint_pre_signed {
 		let n in 0 .. T::MaxAttributesPerCall::get() as u32;
-		let caller_public = sr25519_generate(0.into(), None);
-		let caller_signer = MultiSigner::Sr25519(caller_public);
-		let caller = caller_signer.clone().into_account();
+		use sp_core::Pair;
+		let pk = sr25519_generate(0.into(), None);
+		let caller = T::AccountId::decode(&mut &pk.encode()[..]).unwrap(); // TODO remove
 		T::Currency::make_free_balance_be(&caller, DepositBalanceOf::<T, I>::max_value());
 		let caller_lookup = T::Lookup::unlookup(caller.clone());
 
@@ -754,12 +754,13 @@ benchmarks_instance_pallet! {
 			deadline: One::one(),
 		};
 		let message = Encode::encode(&mint_data);
-		let signature = MultiSignature::Sr25519(sr25519_sign(0.into(), &caller_public, &message).unwrap());
+		let signature = MultiSignature::Sr25519(sr25519_sign(0.into(), &pk, &message).unwrap());
 
+		let on_chain_sig = T::OffchainSignature::decode(&mut &signature.encode()[..]).unwrap(); // TODO remove
 		let target: T::AccountId = account("target", 0, SEED);
 		T::Currency::make_free_balance_be(&target, DepositBalanceOf::<T, I>::max_value());
 		frame_system::Pallet::<T>::set_block_number(One::one());
-	}: _(SystemOrigin::Signed(target.clone()), mint_data, signature, caller)
+	}: _(SystemOrigin::Signed(target.clone()), mint_data, on_chain_sig, caller)
 	verify {
 		let metadata: BoundedVec<_, _> = metadata.try_into().unwrap();
 		assert_last_event::<T, I>(Event::ItemMetadataSet { collection, item, data: metadata }.into());
