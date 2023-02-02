@@ -67,7 +67,7 @@ pub mod pallet {
 	use super::*;
 	use frame_support::{pallet_prelude::*, traits::ExistenceRequirement};
 	use frame_system::pallet_prelude::*;
-	use sp_runtime::traits::{IdentifyAccount, Verify};
+	use sp_runtime::traits::{Convert, IdentifyAccount, Verify};
 
 	#[pallet::pallet]
 	#[pallet::generate_store(pub(super) trait Store)]
@@ -77,6 +77,7 @@ pub mod pallet {
 	pub trait BenchmarkHelper<CollectionId, ItemId> {
 		fn collection(i: u16) -> CollectionId;
 		fn item(i: u16) -> ItemId;
+		// fn signature(sig: MultiSignature) -> Signature;
 	}
 	#[cfg(feature = "runtime-benchmarks")]
 	impl<CollectionId: From<u16>, ItemId: From<u16>> BenchmarkHelper<CollectionId, ItemId> for () {
@@ -180,6 +181,7 @@ pub mod pallet {
 		///
 		/// Can verify whether an [Config::AccountId] created a signature.
 		type OffchainSignature: Verify<Signer = Self::OffchainPublic> + Parameter;
+		// + From<MultiSignature>;
 
 		/// Off-Chain public key.
 		///
@@ -189,6 +191,9 @@ pub mod pallet {
 		#[cfg(feature = "runtime-benchmarks")]
 		/// A set of helper functions for benchmarking.
 		type Helper: BenchmarkHelper<Self::CollectionId, Self::ItemId>;
+
+		#[cfg(feature = "runtime-benchmarks")]
+		type SignatureConverter: Convert<MultiSignature, Self::OffchainSignature>;
 
 		/// Weight information for extrinsics in this pallet.
 		type WeightInfo: WeightInfo;

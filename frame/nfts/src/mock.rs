@@ -28,7 +28,7 @@ use sp_core::H256;
 use sp_keystore::{testing::KeyStore, KeystoreExt};
 use sp_runtime::{
 	testing::Header,
-	traits::{BlakeTwo256, IdentifyAccount, IdentityLookup, Verify},
+	traits::{BlakeTwo256, Convert, IdentifyAccount, IdentityLookup, Verify},
 	MultiSignature,
 };
 use std::sync::Arc;
@@ -95,6 +95,13 @@ parameter_types! {
 	pub storage Features: PalletFeatures = PalletFeatures::all_enabled();
 }
 
+pub struct SignatureConverter();
+impl Convert<MultiSignature, Signature> for SignatureConverter {
+	fn convert(sig: MultiSignature) -> Signature {
+		Signature::decode(&mut &sig.encode()[..]).unwrap()
+	}
+}
+
 impl Config for Test {
 	type RuntimeEvent = RuntimeEvent;
 	type CollectionId = u32;
@@ -124,6 +131,8 @@ impl Config for Test {
 	type WeightInfo = ();
 	#[cfg(feature = "runtime-benchmarks")]
 	type Helper = ();
+	#[cfg(feature = "runtime-benchmarks")]
+	type SignatureConverter = SignatureConverter;
 }
 
 pub(crate) fn new_test_ext() -> sp_io::TestExternalities {
