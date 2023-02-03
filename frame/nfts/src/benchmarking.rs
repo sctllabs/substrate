@@ -32,7 +32,10 @@ use frame_support::{
 };
 use frame_system::RawOrigin as SystemOrigin;
 use sp_io::crypto::{sr25519_generate, sr25519_sign};
-use sp_runtime::traits::{Bounded, Convert, IdentifyAccount, One};
+use sp_runtime::{
+	traits::{Bounded, Convert, IdentifyAccount, One},
+	AccountId32,
+};
 use sp_std::prelude::*;
 
 use crate::Pallet as Nfts;
@@ -161,6 +164,7 @@ benchmarks_instance_pallet! {
 	where_clause {
 		where
 			T::OffchainSignature: From<MultiSignature>,
+			T::AccountId: From<AccountId32>,
 	}
 
 	create {
@@ -729,9 +733,8 @@ benchmarks_instance_pallet! {
 
 	mint_pre_signed {
 		let n in 0 .. T::MaxAttributesPerCall::get() as u32;
-		use sp_core::Pair;
 		let public_key = sr25519_generate(0.into(), None);
-		let caller = <T::Helper as BenchmarkHelper<_,_,_>>::AccountConverter::convert(public_key.encode());
+		let caller = MultiSigner::Sr25519(public_key).into_account().into();
 		T::Currency::make_free_balance_be(&caller, DepositBalanceOf::<T, I>::max_value());
 		let caller_lookup = T::Lookup::unlookup(caller.clone());
 

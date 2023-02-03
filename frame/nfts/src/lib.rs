@@ -74,23 +74,19 @@ pub mod pallet {
 	pub struct Pallet<T, I = ()>(_);
 
 	#[cfg(feature = "runtime-benchmarks")]
-	pub trait BenchmarkHelper<CollectionId, ItemId, AccountId> {
+	pub trait BenchmarkHelper<CollectionId, ItemId> {
 		fn collection(i: u16) -> CollectionId;
 		fn item(i: u16) -> ItemId;
-		type AccountConverter: Convert<Vec<u8>, AccountId>;
 	}
 
 	#[cfg(feature = "runtime-benchmarks")]
-	impl<CollectionId: From<u16>, ItemId: From<u16>, AccountId>
-		BenchmarkHelper<CollectionId, ItemId, AccountId> for ()
-	{
+	impl<CollectionId: From<u16>, ItemId: From<u16>> BenchmarkHelper<CollectionId, ItemId> for () {
 		fn collection(i: u16) -> CollectionId {
 			i.into()
 		}
 		fn item(i: u16) -> ItemId {
 			i.into()
 		}
-		type AccountConverter = ImpossibleConverter;
 	}
 
 	pub struct ImpossibleConverter;
@@ -192,7 +188,6 @@ pub mod pallet {
 		///
 		/// Can verify whether an [Config::AccountId] created a signature.
 		type OffchainSignature: Verify<Signer = Self::OffchainPublic> + Parameter;
-		// + From<MultiSignature>;
 
 		/// Off-Chain public key.
 		///
@@ -201,7 +196,7 @@ pub mod pallet {
 
 		#[cfg(feature = "runtime-benchmarks")]
 		/// A set of helper functions for benchmarking.
-		type Helper: BenchmarkHelper<Self::CollectionId, Self::ItemId, Self::AccountId>;
+		type Helper: BenchmarkHelper<Self::CollectionId, Self::ItemId>;
 
 		/// Weight information for extrinsics in this pallet.
 		type WeightInfo: WeightInfo;

@@ -29,7 +29,7 @@ use frame_support::{
 };
 use pallet_balances::Error as BalancesError;
 use sp_core::{bounded::BoundedVec, Pair};
-use sp_runtime::{traits::IdentifyAccount, MultiSignature, MultiSigner};
+use sp_runtime::{testing::UintAuthorityId, traits::IdentifyAccount, MultiSignature, MultiSigner};
 use sp_std::prelude::*;
 
 type AccountIdOf<Test> = <Test as frame_system::Config>::AccountId;
@@ -224,7 +224,7 @@ fn pre_signed_mints_should_work() {
 			item: 0,
 			attributes: vec![],
 			metadata: vec![],
-			only_account: Some(AccountId::new([2; 32])),
+			only_account: Some(user_2),
 			deadline: 10000000,
 		};
 

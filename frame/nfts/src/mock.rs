@@ -95,30 +95,6 @@ parameter_types! {
 	pub storage Features: PalletFeatures = PalletFeatures::all_enabled();
 }
 
-pub struct Helper;
-#[cfg(feature = "runtime-benchmarks")]
-impl<CollectionId: From<u16>, ItemId: From<u16>, AccountId>
-	BenchmarkHelper<CollectionId, ItemId, AccountId> for Helper
-where
-	AccountConverter: Convert<Vec<u8>, AccountId>,
-{
-	fn collection(i: u16) -> CollectionId {
-		i.into()
-	}
-	fn item(i: u16) -> ItemId {
-		i.into()
-	}
-	type AccountConverter = AccountConverter;
-}
-
-pub struct AccountConverter;
-#[cfg(feature = "runtime-benchmarks")]
-impl Convert<Vec<u8>, AccountId> for AccountConverter {
-	fn convert(address: Vec<u8>) -> AccountId {
-		AccountId::decode(&mut &address[..]).unwrap()
-	}
-}
-
 impl Config for Test {
 	type RuntimeEvent = RuntimeEvent;
 	type CollectionId = u32;
@@ -148,7 +124,7 @@ impl Config for Test {
 	type OffchainPublic = AccountPublic;
 	type WeightInfo = ();
 	#[cfg(feature = "runtime-benchmarks")]
-	type Helper = Helper;
+	type Helper = ();
 }
 
 pub(crate) fn new_test_ext() -> sp_io::TestExternalities {
