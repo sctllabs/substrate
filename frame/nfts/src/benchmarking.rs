@@ -731,7 +731,7 @@ benchmarks_instance_pallet! {
 		let n in 0 .. T::MaxAttributesPerCall::get() as u32;
 		use sp_core::Pair;
 		let public_key = sr25519_generate(0.into(), None);
-		let caller = <T::Helper as BenchmarkHelper<_,_,_,_>>::AccountConverter::convert(public_key.encode());
+		let caller = <T::Helper as BenchmarkHelper<_,_,_>>::AccountConverter::convert(public_key.encode());
 		T::Currency::make_free_balance_be(&caller, DepositBalanceOf::<T, I>::max_value());
 		let caller_lookup = T::Lookup::unlookup(caller.clone());
 
@@ -760,9 +760,6 @@ benchmarks_instance_pallet! {
 		};
 		let message = Encode::encode(&mint_data);
 		let signature = MultiSignature::Sr25519(sr25519_sign(0.into(), &public_key, &message).unwrap());
-		// let signature = <T::Helper as BenchmarkHelper<_,_,_>>::SignatureConverter::convert(MultiSignature::Sr25519(sr25519_sign(0.into(), &pk, &message).unwrap()));
-
-		let on_chain_sig = T::OffchainSignature::decode(&mut &signature.encode()[..]).unwrap(); // TODO remove
 		let target: T::AccountId = account("target", 0, SEED);
 		T::Currency::make_free_balance_be(&target, DepositBalanceOf::<T, I>::max_value());
 		frame_system::Pallet::<T>::set_block_number(One::one());

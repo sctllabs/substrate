@@ -97,10 +97,9 @@ parameter_types! {
 
 pub struct Helper;
 #[cfg(feature = "runtime-benchmarks")]
-impl<OffchainSignature, CollectionId: From<u16>, ItemId: From<u16>, AccountId>
-	BenchmarkHelper<OffchainSignature, CollectionId, ItemId, AccountId> for Helper
+impl<CollectionId: From<u16>, ItemId: From<u16>, AccountId>
+	BenchmarkHelper<CollectionId, ItemId, AccountId> for Helper
 where
-	SignatureConverter: Convert<MultiSignature, OffchainSignature>,
 	AccountConverter: Convert<Vec<u8>, AccountId>,
 {
 	fn collection(i: u16) -> CollectionId {
@@ -109,16 +108,7 @@ where
 	fn item(i: u16) -> ItemId {
 		i.into()
 	}
-	type SignatureConverter = SignatureConverter;
 	type AccountConverter = AccountConverter;
-}
-
-pub struct SignatureConverter;
-#[cfg(feature = "runtime-benchmarks")]
-impl Convert<MultiSignature, Signature> for SignatureConverter {
-	fn convert(sig: MultiSignature) -> Signature {
-		Signature::decode(&mut &sig.encode()[..]).unwrap()
-	}
 }
 
 pub struct AccountConverter;
@@ -152,6 +142,7 @@ impl Config for Test {
 	type MaxAttributesPerCall = ConstU32<2>;
 	type Features = Features;
 	/// Off-chain = signature On-chain - therefore no conversion needed.
+	/// It needs to be From<MultiSignature> for benchmarking.
 	type OffchainSignature = Signature;
 	/// Using `AccountPublic` here makes it trivial to convert to `AccountId` via `into_account()`.
 	type OffchainPublic = AccountPublic;
