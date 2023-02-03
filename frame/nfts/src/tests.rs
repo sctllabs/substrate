@@ -29,10 +29,10 @@ use frame_support::{
 };
 use pallet_balances::Error as BalancesError;
 use sp_core::{bounded::BoundedVec, Pair};
-use sp_runtime::{MultiSignature, MultiSigner};
+use sp_runtime::{traits::IdentifyAccount, MultiSignature, MultiSigner};
 use sp_std::prelude::*;
 
-type AccountIdOf<T> = <T as frame_system::Config>::AccountId;
+type AccountIdOf<Test> = <Test as frame_system::Config>::AccountId;
 
 fn account(id: u8) -> AccountIdOf<Test> {
 	[id; 32].into()
@@ -147,8 +147,6 @@ fn item_config_from_disabled_settings(settings: BitFlags<ItemSetting>) -> ItemCo
 
 #[test]
 fn pre_signed_mints_should_work() {
-	use sp_runtime::{traits::IdentifyAccount, AccountId32};
-
 	new_test_ext().execute_with(|| {
 		let user_1_pair = sp_core::sr25519::Pair::from_string("//Alice", None).unwrap();
 		let user_1_signer = MultiSigner::Sr25519(user_1_pair.public());
