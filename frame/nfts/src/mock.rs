@@ -95,10 +95,37 @@ parameter_types! {
 	pub storage Features: PalletFeatures = PalletFeatures::all_enabled();
 }
 
-pub struct SignatureConverter();
+pub struct Helper;
+#[cfg(feature = "runtime-benchmarks")]
+impl<OffchainSignature, CollectionId: From<u16>, ItemId: From<u16>, AccountId>
+	BenchmarkHelper<OffchainSignature, CollectionId, ItemId, AccountId> for Helper
+where
+	SignatureConverter: Convert<MultiSignature, OffchainSignature>,
+	AccountConverter: Convert<Vec<u8>, AccountId>,
+{
+	fn collection(i: u16) -> CollectionId {
+		i.into()
+	}
+	fn item(i: u16) -> ItemId {
+		i.into()
+	}
+	type SignatureConverter = SignatureConverter;
+	type AccountConverter = AccountConverter;
+}
+
+pub struct SignatureConverter;
+#[cfg(feature = "runtime-benchmarks")]
 impl Convert<MultiSignature, Signature> for SignatureConverter {
 	fn convert(sig: MultiSignature) -> Signature {
 		Signature::decode(&mut &sig.encode()[..]).unwrap()
+	}
+}
+
+pub struct AccountConverter;
+#[cfg(feature = "runtime-benchmarks")]
+impl Convert<Vec<u8>, AccountId> for AccountConverter {
+	fn convert(address: Vec<u8>) -> AccountId {
+		AccountId::decode(&mut &address[..]).unwrap()
 	}
 }
 
@@ -130,7 +157,7 @@ impl Config for Test {
 	type OffchainPublic = AccountPublic;
 	type WeightInfo = ();
 	#[cfg(feature = "runtime-benchmarks")]
-	type Helper = ();
+	type Helper = Helper;
 }
 
 pub(crate) fn new_test_ext() -> sp_io::TestExternalities {

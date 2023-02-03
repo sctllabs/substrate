@@ -34,6 +34,10 @@ use sp_std::prelude::*;
 
 type AccountIdOf<T> = <T as frame_system::Config>::AccountId;
 
+fn account(id: u8) -> AccountIdOf<Test> {
+	[id; 32].into()
+}
+
 fn items() -> Vec<(AccountIdOf<Test>, u32, u32)> {
 	let mut r: Vec<_> = Account::<Test>::iter().map(|x| x.0).collect();
 	r.sort();
@@ -160,8 +164,8 @@ fn pre_signed_mints_should_work() {
 		};
 		let message = Encode::encode(&mint_data);
 		let signature = MultiSignature::Sr25519(user_1_pair.sign(&message));
-		let user_2 = AccountId32::new([2; 32]);
-		let user_3 = AccountId32::new([3; 32]);
+		let user_2 = account(2);
+		let user_3 = account(3);
 
 		Balances::make_free_balance_be(&user_1, 100);
 		Balances::make_free_balance_be(&user_2, 100);
