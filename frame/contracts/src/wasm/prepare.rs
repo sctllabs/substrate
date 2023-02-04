@@ -414,7 +414,7 @@ where
 		// This is not our only defense: We check for float types later in the preparation
 		// process. Additionally, all instructions explictily  need to have weights assigned
 		// or the deployment will fail. We have none assigned for float instructions.
-		deterministic_only: matches!(determinism, Determinism::Deterministic),
+		floats: matches!(determinism, Determinism::AllowIndeterminism),
 		mutable_global: false,
 		saturating_float_to_int: false,
 		sign_extension: false,
@@ -422,6 +422,7 @@ where
 		multi_value: false,
 		reference_types: false,
 		simd: false,
+		memory_control: false,
 	})
 	.validate_all(original_code)
 	.map_err(|err| {
@@ -704,7 +705,7 @@ mod tests {
 			)
 			(func (export "deploy"))
 		)"#,
-		Err("gas instrumentation failed")
+		Err("validation of new code failed")
 	);
 
 	mod functions {
@@ -1214,7 +1215,7 @@ mod tests {
 				(func (export "deploy"))
 			)
 			"#,
-			Err("use of floating point type in globals is forbidden")
+			Err("validation of new code failed")
 		);
 
 		prepare_test!(
@@ -1250,7 +1251,7 @@ mod tests {
 				(func (export "deploy"))
 			)
 			"#,
-			Err("use of floating point type in function types is forbidden")
+			Err("validation of new code failed")
 		);
 	}
 }

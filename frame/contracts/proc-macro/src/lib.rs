@@ -578,7 +578,7 @@ fn expand_functions(
 		let inner = if expand_blocks {
 			quote! { || #output {
 				let (memory, ctx) = __caller__
-					.host_data()
+					.data()
 					.memory()
 					.expect("Memory must be set when setting up host data; qed")
 					.data_and_store_mut(&mut __caller__);
@@ -595,7 +595,7 @@ fn expand_functions(
 		let map_err = if expand_blocks {
 			quote! {
 				|reason| {
-					::wasmi::core::Trap::host(reason)
+					::wasmi::core::Trap::from(reason)
 				}
 			}
 		} else {
