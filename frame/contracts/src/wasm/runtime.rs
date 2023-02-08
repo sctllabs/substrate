@@ -504,7 +504,7 @@ impl<'a, E: Ext + 'a> Runtime<'a, E> {
 					},
 					Termination =>
 						Ok(ExecReturnValue { flags: ReturnFlags::empty(), data: Vec::new() }),
-					SupervisorError(error) => return Err(error.clone().into()),
+					SupervisorError(error) => return Err(error.into()),
 				}
 			},
 			// Any other error is returned only if instantiation or linking failed (i.e.
