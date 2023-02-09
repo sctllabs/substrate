@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2018-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2018-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,28 +18,38 @@
 //! This module provides a means for executing contracts
 //! represented in wasm.
 
-#[macro_use]
-mod env_def;
 mod code_cache;
 mod prepare;
 mod runtime;
 
 #[cfg(feature = "runtime-benchmarks")]
-pub use self::code_cache::reinstrument;
-pub use self::runtime::{ReturnCode, Runtime, RuntimeCosts};
+pub use crate::wasm::code_cache::reinstrument;
+#[cfg(doc)]
+pub use crate::wasm::runtime::api_doc;
+pub use crate::wasm::{
+	prepare::TryInstantiate,
+	runtime::{
+		AllowDeprecatedInterface, AllowUnstableInterface, CallFlags, Environment, ReturnCode,
+		Runtime, RuntimeCosts,
+	},
+};
+
 use crate::{
 	exec::{ExecResult, Executable, ExportedFunction, Ext},
 	gas::GasMeter,
-	wasm::env_def::FunctionImplProvider,
-	AccountIdOf, BalanceOf, CodeHash, CodeStorage, Config, Schedule,
+	AccountIdOf, BalanceOf, CodeHash, CodeStorage, CodeVec, Config, Error, RelaxedCodeVec,
+	Schedule,
 };
 use codec::{Decode, Encode, MaxEncodedLen};
 use frame_support::dispatch::{DispatchError, DispatchResult};
-use sp_core::crypto::UncheckedFrom;
-use sp_sandbox::{SandboxEnvironmentBuilder, SandboxInstance, SandboxMemory};
+use sp_core::Get;
+use sp_runtime::RuntimeDebug;
 use sp_std::prelude::*;
 #[cfg(test)]
 pub use tests::MockExt;
+use wasmi::{
+	Config as WasmiConfig, Engine, Instance, Linker, Memory, MemoryType, Module, StackLimits, Store,
+};
 
 /// A prepared wasm module ready for execution.
 ///
@@ -50,7 +60,8 @@ pub use tests::MockExt;
 /// `instruction_weights_version` and `code` change when a contract with an outdated instrumentation
 /// is called. Therefore one must be careful when holding any in-memory representation of this
 /// type while calling into a contract as those fields can get out of date.
-#[derive(Clone, Encode, Decode, scale_info::TypeInfo)]
+#[derive(Clone, Encode, Decode, scale_info::TypeInfo, MaxEncodedLen)]
+#[codec(mel_bound())]
 #[scale_info(skip_type_params(T))]
 pub struct PrefabWasmModule<T: Config> {
 	/// Version of the instruction weights with which the code was instrumented.
@@ -63,14 +74,18 @@ pub struct PrefabWasmModule<T: Config> {
 	#[codec(compact)]
 	maximum: u32,
 	/// Code instrumented with the latest schedule.
-	code: Vec<u8>,
+	code: RelaxedCodeVec<T>,
+	/// A code that might contain non deterministic features and is therefore never allowed
+	/// to be run on chain. Specifically this code can never be instantiated into a contract
+	/// and can just be used through a delegate call.
+	determinism: Determinism,
 	/// The uninstrumented, pristine version of the code.
 	///
 	/// It is not stored because the pristine code has its own storage item. The value
 	/// is only `Some` when this module was created from an `original_code` and `None` if
 	/// it was loaded from storage.
 	#[codec(skip)]
-	original_code: Option<Vec<u8>>,
+	original_code: Option<CodeVec<T>>,
 	/// The code hash of the stored code which is defined as the hash over the `original_code`.
 	///
 	/// As the map key there is no need to store the hash in the value, too. It is set manually
@@ -87,7 +102,7 @@ pub struct PrefabWasmModule<T: Config> {
 ///
 /// It is stored in a separate storage entry to avoid loading the code when not necessary.
 #[derive(Clone, Encode, Decode, scale_info::TypeInfo, MaxEncodedLen)]
-#[codec(mel_bound(T: Config))]
+#[codec(mel_bound())]
 #[scale_info(skip_type_params(T))]
 pub struct OwnerInfo<T: Config> {
 	/// The account that has deployed the contract and hence is allowed to remove it.
@@ -100,6 +115,27 @@ pub struct OwnerInfo<T: Config> {
 	refcount: u64,
 }
 
+/// Defines the required determinism level of a wasm blob when either running or uploading code.
+#[derive(
+	Clone, Copy, Encode, Decode, scale_info::TypeInfo, MaxEncodedLen, RuntimeDebug, PartialEq, Eq,
+)]
+pub enum Determinism {
+	/// The execution should be deterministic and hence no indeterministic instructions are
+	/// allowed.
+	///
+	/// Dispatchables always use this mode in order to make on-chain execution deterministic.
+	Deterministic,
+	/// Allow calling or uploading an indeterministic code.
+	///
+	/// This is only possible when calling into `pallet-contracts` directly via
+	/// [`crate::Pallet::bare_call`].
+	///
+	/// # Note
+	///
+	/// **Never** use this mode for on-chain execution.
+	AllowIndeterminism,
+}
+
 impl ExportedFunction {
 	/// The wasm export name for the function.
 	fn identifier(&self) -> &str {
@@ -110,25 +146,32 @@ impl ExportedFunction {
 	}
 }
 
-impl<T: Config> PrefabWasmModule<T>
-where
-	T::AccountId: UncheckedFrom<T::Hash> + AsRef<[u8]>,
-{
+impl<T: Config> PrefabWasmModule<T> {
 	/// Create the module by checking and instrumenting `original_code`.
 	///
 	/// This does **not** store the module. For this one need to either call [`Self::store`]
-	/// or [`<Self as Executable>::execute`].
+	/// or [`<Self as Executable>::execute`][`Executable::execute`].
 	pub fn from_code(
 		original_code: Vec<u8>,
 		schedule: &Schedule<T>,
 		owner: AccountIdOf<T>,
-	) -> Result<Self, DispatchError> {
-		prepare::prepare_contract(original_code, schedule, owner).map_err(Into::into)
+		determinism: Determinism,
+		try_instantiate: TryInstantiate,
+	) -> Result<Self, (DispatchError, &'static str)> {
+		let module = prepare::prepare::<runtime::Env, T>(
+			original_code.try_into().map_err(|_| (<Error<T>>::CodeTooLarge.into(), ""))?,
+			schedule,
+			owner,
+			determinism,
+			try_instantiate,
+		)?;
+		Ok(module)
 	}
 
 	/// Store the code without instantiating it.
 	///
-	/// Otherwise the code is stored when [`<Self as Executable>::execute`] is called.
+	/// Otherwise the code is stored when [`<Self as Executable>::execute`][`Executable::execute`]
+	/// is called.
 	pub fn store(self) -> DispatchResult {
 		code_cache::store(self, false)
 	}
@@ -154,20 +197,62 @@ where
 		}
 	}
 
-	/// Create and store the module without checking nor instrumenting the passed code.
+	/// Creates and returns an instance of the supplied code.
 	///
-	/// # Note
-	///
-	/// This is useful for benchmarking where we don't want instrumentation to skew
-	/// our results. This also does not collect any deposit from the `owner`.
+	/// This is either used for later executing a contract or for validation of a contract.
+	/// When validating we pass `()` as `host_state`. Please note that such a dummy instance must
+	/// **never** be called/executed since it will panic the executor.
+	pub fn instantiate<E, H>(
+		code: &[u8],
+		host_state: H,
+		memory: (u32, u32),
+		stack_limits: StackLimits,
+		allow_deprecated: AllowDeprecatedInterface,
+	) -> Result<(Store<H>, Memory, Instance), wasmi::Error>
+	where
+		E: Environment<H>,
+	{
+		let mut config = WasmiConfig::default();
+		config
+			.set_stack_limits(stack_limits)
+			.wasm_multi_value(false)
+			.wasm_mutable_global(false)
+			.wasm_sign_extension(false)
+			.wasm_saturating_float_to_int(false);
+		let engine = Engine::new(&config);
+		let module = Module::new(&engine, code)?;
+		let mut store = Store::new(&engine, host_state);
+		let mut linker = Linker::new();
+		E::define(
+			&mut store,
+			&mut linker,
+			if T::UnsafeUnstableInterface::get() {
+				AllowUnstableInterface::Yes
+			} else {
+				AllowUnstableInterface::No
+			},
+			allow_deprecated,
+		)?;
+		let memory = Memory::new(&mut store, MemoryType::new(memory.0, Some(memory.1))?).expect(
+			"The limits defined in our `Schedule` limit the amount of memory well below u32::MAX; qed",
+		);
+		linker
+			.define("env", "memory", memory)
+			.expect("We just created the linker. It has no define with this name attached; qed");
+
+		let instance = linker.instantiate(&mut store, &module)?.ensure_no_start(&mut store)?;
+
+		Ok((store, memory, instance))
+	}
+
+	/// See [`Self::from_code_unchecked`].
 	#[cfg(feature = "runtime-benchmarks")]
 	pub fn store_code_unchecked(
 		original_code: Vec<u8>,
 		schedule: &Schedule<T>,
 		owner: T::AccountId,
 	) -> DispatchResult {
-		let executable = prepare::benchmarking::prepare_contract(original_code, schedule, owner)
-			.map_err::<DispatchError, _>(Into::into)?;
+		let executable = Self::from_code_unchecked(original_code, schedule, owner)?;
 		code_cache::store(executable, false)
 	}
 
@@ -175,6 +260,23 @@ where
 	#[cfg(test)]
 	pub fn decrement_version(&mut self) {
 		self.instruction_weights_version = self.instruction_weights_version.checked_sub(1).unwrap();
+	}
+
+	/// Create the module without checking nor instrumenting the passed code.
+	///
+	/// # Note
+	///
+	/// This is useful for benchmarking where we don't want instrumentation to skew
+	/// our results. This also does not collect any deposit from the `owner`. Also useful
+	/// during testing when we want to deploy codes that do not pass the instantiation checks.
+	#[cfg(any(test, feature = "runtime-benchmarks"))]
+	fn from_code_unchecked(
+		original_code: Vec<u8>,
+		schedule: &Schedule<T>,
+		owner: T::AccountId,
+	) -> Result<Self, DispatchError> {
+		prepare::benchmarking::prepare(original_code, schedule, owner)
+			.map_err::<DispatchError, _>(Into::into)
 	}
 }
 
@@ -186,10 +288,7 @@ impl<T: Config> OwnerInfo<T> {
 	}
 }
 
-impl<T: Config> Executable<T> for PrefabWasmModule<T>
-where
-	T::AccountId: UncheckedFrom<T::Hash> + AsRef<[u8]>,
-{
+impl<T: Config> Executable<T> for PrefabWasmModule<T> {
 	fn from_storage(
 		code_hash: CodeHash<T>,
 		schedule: &Schedule<T>,
@@ -198,7 +297,11 @@ where
 		code_cache::load(code_hash, schedule, gas_meter)
 	}
 
-	fn remove_user(code_hash: CodeHash<T>) -> Result<(), DispatchError> {
+	fn add_user(code_hash: CodeHash<T>) -> Result<(), DispatchError> {
+		code_cache::increment_refcount::<T>(code_hash)
+	}
+
+	fn remove_user(code_hash: CodeHash<T>) {
 		code_cache::decrement_refcount::<T>(code_hash)
 	}
 
@@ -208,36 +311,39 @@ where
 		function: &ExportedFunction,
 		input_data: Vec<u8>,
 	) -> ExecResult {
-		let memory = sp_sandbox::default_executor::Memory::new(self.initial, Some(self.maximum))
-			.unwrap_or_else(|_| {
-				// unlike `.expect`, explicit panic preserves the source location.
-				// Needed as we can't use `RUST_BACKTRACE` in here.
-				panic!(
-					"exec.prefab_module.initial can't be greater than exec.prefab_module.maximum;
-						thus Memory::new must not fail;
-						qed"
-				)
-			});
+		let runtime = Runtime::new(ext, input_data);
+		let (mut store, memory, instance) = Self::instantiate::<crate::wasm::runtime::Env, _>(
+			self.code.as_slice(),
+			runtime,
+			(self.initial, self.maximum),
+			StackLimits::default(),
+			match function {
+				ExportedFunction::Constructor => AllowDeprecatedInterface::No,
+				ExportedFunction::Call => AllowDeprecatedInterface::Yes,
+			},
+		)
+		.map_err(|msg| {
+			log::debug!(target: "runtime::contracts", "failed to instantiate code: {}", msg);
+			Error::<T>::CodeRejected
+		})?;
+		store.state_mut().set_memory(memory);
 
-		let mut imports = sp_sandbox::default_executor::EnvironmentDefinitionBuilder::new();
-		imports.add_memory(self::prepare::IMPORT_MODULE_MEMORY, "memory", memory.clone());
-		runtime::Env::impls(&mut |module, name, func_ptr| {
-			imports.add_host_func(module, name, func_ptr);
-		});
+		let exported_func = instance
+			.get_export(&store, function.identifier())
+			.and_then(|export| export.into_func())
+			.ok_or_else(|| {
+				log::error!(target: "runtime::contracts", "failed to find entry point");
+				Error::<T>::CodeRejected
+			})?;
 
 		// We store before executing so that the code hash is available in the constructor.
-		let code = self.code.clone();
 		if let &ExportedFunction::Constructor = function {
 			code_cache::store(self, true)?;
 		}
 
-		// Instantiate the instance from the instrumented module code and invoke the contract
-		// entrypoint.
-		let mut runtime = Runtime::new(ext, input_data, memory);
-		let result = sp_sandbox::default_executor::Instance::new(&code, &imports, &mut runtime)
-			.and_then(|mut instance| instance.invoke(function.identifier(), &[], &mut runtime));
+		let result = exported_func.call(&mut store, &[], &mut []);
 
-		runtime.to_execution_result(result)
+		store.into_state().to_execution_result(result)
 	}
 
 	fn code_hash(&self) -> &CodeHash<T> {
@@ -247,6 +353,10 @@ where
 	fn code_len(&self) -> u32 {
 		self.code.len() as u32
 	}
+
+	fn is_deterministic(&self) -> bool {
+		matches!(self.determinism, Determinism::Deterministic)
+	}
 }
 
 #[cfg(test)]
@@ -254,24 +364,29 @@ mod tests {
 	use super::*;
 	use crate::{
 		exec::{
-			AccountIdOf, BlockNumberOf, ErrorOrigin, ExecError, Executable, Ext, SeedOf, StorageKey,
+			AccountIdOf, BlockNumberOf, ErrorOrigin, ExecError, Executable, Ext, FixSizedKey,
+			SeedOf, VarSizedKey,
 		},
 		gas::GasMeter,
-		tests::{Call, Test, ALICE, BOB},
+		storage::WriteOutcome,
+		tests::{RuntimeCall, Test, ALICE, BOB},
 		BalanceOf, CodeHash, Error, Pallet as Contracts,
 	};
 	use assert_matches::assert_matches;
 	use frame_support::{
-		assert_ok,
-		dispatch::{DispatchResult, DispatchResultWithPostInfo},
-		weights::Weight,
+		assert_err, assert_ok,
+		dispatch::DispatchResultWithPostInfo,
+		weights::{OldWeight, Weight},
 	};
-	use hex_literal::hex;
 	use pallet_contracts_primitives::{ExecReturnValue, ReturnFlags};
 	use pretty_assertions::assert_eq;
-	use sp_core::{Bytes, H256};
+	use sp_core::H256;
 	use sp_runtime::DispatchError;
-	use std::{borrow::BorrowMut, cell::RefCell, collections::HashMap};
+	use std::{
+		borrow::BorrowMut,
+		cell::RefCell,
+		collections::hash_map::{Entry, HashMap},
+	};
 
 	#[derive(Debug, PartialEq, Eq)]
 	struct InstantiateEntry {
@@ -301,38 +416,48 @@ mod tests {
 		allows_reentry: bool,
 	}
 
+	#[derive(Debug, PartialEq, Eq)]
+	struct CallCodeEntry {
+		code_hash: H256,
+		data: Vec<u8>,
+	}
+
 	pub struct MockExt {
-		storage: HashMap<StorageKey, Vec<u8>>,
+		storage: HashMap<Vec<u8>, Vec<u8>>,
 		instantiates: Vec<InstantiateEntry>,
 		terminations: Vec<TerminationEntry>,
 		calls: Vec<CallEntry>,
+		code_calls: Vec<CallCodeEntry>,
 		transfers: Vec<TransferEntry>,
 		// (topics, data)
 		events: Vec<(Vec<H256>, Vec<u8>)>,
-		runtime_calls: RefCell<Vec<Call>>,
+		runtime_calls: RefCell<Vec<RuntimeCall>>,
 		schedule: Schedule<Test>,
 		gas_meter: GasMeter<Test>,
 		debug_buffer: Vec<u8>,
 		ecdsa_recover: RefCell<Vec<([u8; 65], [u8; 32])>>,
+		code_hashes: Vec<CodeHash<Test>>,
 	}
 
 	/// The call is mocked and just returns this hardcoded value.
-	fn call_return_data() -> Bytes {
-		Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF])
+	fn call_return_data() -> Vec<u8> {
+		vec![0xDE, 0xAD, 0xBE, 0xEF]
 	}
 
 	impl Default for MockExt {
 		fn default() -> Self {
 			Self {
+				code_hashes: Default::default(),
 				storage: Default::default(),
 				instantiates: Default::default(),
 				terminations: Default::default(),
 				calls: Default::default(),
+				code_calls: Default::default(),
 				transfers: Default::default(),
 				events: Default::default(),
 				runtime_calls: Default::default(),
 				schedule: Default::default(),
-				gas_meter: GasMeter::new(10_000_000_000),
+				gas_meter: GasMeter::new(Weight::from_parts(10_000_000_000, 10 * 1024 * 1024)),
 				debug_buffer: Default::default(),
 				ecdsa_recover: Default::default(),
 			}
@@ -353,6 +478,14 @@ mod tests {
 			self.calls.push(CallEntry { to, value, data, allows_reentry });
 			Ok(ExecReturnValue { flags: ReturnFlags::empty(), data: call_return_data() })
 		}
+		fn delegate_call(
+			&mut self,
+			code_hash: CodeHash<Self::T>,
+			data: Vec<u8>,
+		) -> Result<ExecReturnValue, ExecError> {
+			self.code_calls.push(CallCodeEntry { code_hash, data });
+			Ok(ExecReturnValue { flags: ReturnFlags::empty(), data: call_return_data() })
+		}
 		fn instantiate(
 			&mut self,
 			gas_limit: Weight,
@@ -362,16 +495,20 @@ mod tests {
 			salt: &[u8],
 		) -> Result<(AccountIdOf<Self::T>, ExecReturnValue), ExecError> {
 			self.instantiates.push(InstantiateEntry {
-				code_hash: code_hash.clone(),
+				code_hash,
 				value,
 				data: data.to_vec(),
-				gas_left: gas_limit,
+				gas_left: gas_limit.ref_time(),
 				salt: salt.to_vec(),
 			});
 			Ok((
-				Contracts::<Test>::contract_address(&ALICE, &code_hash, salt),
-				ExecReturnValue { flags: ReturnFlags::empty(), data: Bytes(Vec::new()) },
+				Contracts::<Test>::contract_address(&ALICE, &code_hash, &data, salt),
+				ExecReturnValue { flags: ReturnFlags::empty(), data: Vec::new() },
 			))
+		}
+		fn set_code_hash(&mut self, hash: CodeHash<Self::T>) -> Result<(), DispatchError> {
+			self.code_hashes.push(hash);
+			Ok(())
 		}
 		fn transfer(&mut self, to: &AccountIdOf<Self::T>, value: u64) -> Result<(), DispatchError> {
 			self.transfers.push(TransferEntry { to: to.clone(), value });
@@ -381,15 +518,71 @@ mod tests {
 			self.terminations.push(TerminationEntry { beneficiary: beneficiary.clone() });
 			Ok(())
 		}
-		fn get_storage(&mut self, key: &StorageKey) -> Option<Vec<u8>> {
-			self.storage.get(key).cloned()
+		fn get_storage(&mut self, key: &FixSizedKey) -> Option<Vec<u8>> {
+			self.storage.get(&key.to_vec()).cloned()
 		}
-		fn set_storage(&mut self, key: StorageKey, value: Option<Vec<u8>>) -> DispatchResult {
-			*self.storage.entry(key).or_insert(Vec::new()) = value.unwrap_or(Vec::new());
-			Ok(())
+		fn get_storage_transparent(&mut self, key: &VarSizedKey<Self::T>) -> Option<Vec<u8>> {
+			self.storage.get(&key.to_vec()).cloned()
+		}
+		fn get_storage_size(&mut self, key: &FixSizedKey) -> Option<u32> {
+			self.storage.get(&key.to_vec()).map(|val| val.len() as u32)
+		}
+		fn get_storage_size_transparent(&mut self, key: &VarSizedKey<Self::T>) -> Option<u32> {
+			self.storage.get(&key.to_vec()).map(|val| val.len() as u32)
+		}
+		fn set_storage(
+			&mut self,
+			key: &FixSizedKey,
+			value: Option<Vec<u8>>,
+			take_old: bool,
+		) -> Result<WriteOutcome, DispatchError> {
+			let key = key.to_vec();
+			let entry = self.storage.entry(key.clone());
+			let result = match (entry, take_old) {
+				(Entry::Vacant(_), _) => WriteOutcome::New,
+				(Entry::Occupied(entry), false) =>
+					WriteOutcome::Overwritten(entry.remove().len() as u32),
+				(Entry::Occupied(entry), true) => WriteOutcome::Taken(entry.remove()),
+			};
+			if let Some(value) = value {
+				self.storage.insert(key, value);
+			}
+			Ok(result)
+		}
+		fn set_storage_transparent(
+			&mut self,
+			key: &VarSizedKey<Self::T>,
+			value: Option<Vec<u8>>,
+			take_old: bool,
+		) -> Result<WriteOutcome, DispatchError> {
+			let key = key.to_vec();
+			let entry = self.storage.entry(key.clone());
+			let result = match (entry, take_old) {
+				(Entry::Vacant(_), _) => WriteOutcome::New,
+				(Entry::Occupied(entry), false) =>
+					WriteOutcome::Overwritten(entry.remove().len() as u32),
+				(Entry::Occupied(entry), true) => WriteOutcome::Taken(entry.remove()),
+			};
+			if let Some(value) = value {
+				self.storage.insert(key, value);
+			}
+			Ok(result)
 		}
 		fn caller(&self) -> &AccountIdOf<Self::T> {
 			&ALICE
+		}
+		fn is_contract(&self, _address: &AccountIdOf<Self::T>) -> bool {
+			true
+		}
+		fn code_hash(&self, _address: &AccountIdOf<Self::T>) -> Option<CodeHash<Self::T>> {
+			Some(H256::from_slice(&[0x11; 32]))
+		}
+		fn own_code_hash(&mut self) -> &CodeHash<Self::T> {
+			const HASH: H256 = H256::repeat_byte(0x10);
+			&HASH
+		}
+		fn caller_is_origin(&self) -> bool {
+			false
 		}
 		fn address(&self) -> &AccountIdOf<Self::T> {
 			&BOB
@@ -419,7 +612,7 @@ mod tests {
 			16_384
 		}
 		fn get_weight_price(&self, weight: Weight) -> BalanceOf<Self::T> {
-			BalanceOf::<Self::T>::from(1312_u32).saturating_mul(weight.into())
+			BalanceOf::<Self::T>::from(1312_u32).saturating_mul(weight.ref_time().into())
 		}
 		fn schedule(&self) -> &Schedule<Self::T> {
 			&self.schedule
@@ -431,7 +624,10 @@ mod tests {
 			self.debug_buffer.extend(msg.as_bytes());
 			true
 		}
-		fn call_runtime(&self, call: <Self::T as Config>::Call) -> DispatchResultWithPostInfo {
+		fn call_runtime(
+			&self,
+			call: <Self::T as Config>::RuntimeCall,
+		) -> DispatchResultWithPostInfo {
 			self.runtime_calls.borrow_mut().push(call);
 			Ok(Default::default())
 		}
@@ -440,20 +636,97 @@ mod tests {
 			signature: &[u8; 65],
 			message_hash: &[u8; 32],
 		) -> Result<[u8; 33], ()> {
-			self.ecdsa_recover.borrow_mut().push((signature.clone(), message_hash.clone()));
+			self.ecdsa_recover.borrow_mut().push((*signature, *message_hash));
 			Ok([3; 33])
 		}
 		fn contract_info(&mut self) -> &mut crate::ContractInfo<Self::T> {
 			unimplemented!()
 		}
+		fn ecdsa_to_eth_address(&self, _pk: &[u8; 33]) -> Result<[u8; 20], ()> {
+			Ok([2u8; 20])
+		}
+		fn reentrance_count(&self) -> u32 {
+			12
+		}
+		fn account_reentrance_count(&self, _account_id: &AccountIdOf<Self::T>) -> u32 {
+			12
+		}
+		fn nonce(&mut self) -> u64 {
+			995
+		}
 	}
 
-	fn execute<E: BorrowMut<MockExt>>(wat: &str, input_data: Vec<u8>, mut ext: E) -> ExecResult {
+	/// Execute the supplied code.
+	///
+	/// Not used directly but through the wrapper functions defined below.
+	fn execute_internal<E: BorrowMut<MockExt>>(
+		wat: &str,
+		input_data: Vec<u8>,
+		mut ext: E,
+		entry_point: &ExportedFunction,
+		unstable_interface: bool,
+		skip_checks: bool,
+	) -> ExecResult {
+		type RuntimeConfig = <MockExt as Ext>::T;
+		RuntimeConfig::set_unstable_interface(unstable_interface);
 		let wasm = wat::parse_str(wat).unwrap();
 		let schedule = crate::Schedule::default();
-		let executable =
-			PrefabWasmModule::<<MockExt as Ext>::T>::from_code(wasm, &schedule, ALICE).unwrap();
-		executable.execute(ext.borrow_mut(), &ExportedFunction::Call, input_data)
+		let executable = if skip_checks {
+			PrefabWasmModule::<RuntimeConfig>::from_code_unchecked(wasm, &schedule, ALICE)?
+		} else {
+			PrefabWasmModule::<RuntimeConfig>::from_code(
+				wasm,
+				&schedule,
+				ALICE,
+				Determinism::Deterministic,
+				TryInstantiate::Instantiate,
+			)
+			.map_err(|err| err.0)?
+		};
+		executable.execute(ext.borrow_mut(), entry_point, input_data)
+	}
+
+	/// Execute the suppplied code.
+	fn execute<E: BorrowMut<MockExt>>(wat: &str, input_data: Vec<u8>, ext: E) -> ExecResult {
+		execute_internal(wat, input_data, ext, &ExportedFunction::Call, true, false)
+	}
+
+	/// Execute the supplied code with disabled unstable functions.
+	///
+	/// In our test config unstable functions are disabled so that we can test them.
+	/// In order to test that code using them is properly rejected we temporarily disable
+	/// them when this test is run.
+	#[cfg(not(feature = "runtime-benchmarks"))]
+	fn execute_no_unstable<E: BorrowMut<MockExt>>(
+		wat: &str,
+		input_data: Vec<u8>,
+		ext: E,
+	) -> ExecResult {
+		execute_internal(wat, input_data, ext, &ExportedFunction::Call, false, false)
+	}
+
+	/// Execute code without validating it first.
+	///
+	/// This is mainly useful in order to test code which uses deprecated functions. Those
+	/// would fail when validating the code.
+	fn execute_unvalidated<E: BorrowMut<MockExt>>(
+		wat: &str,
+		input_data: Vec<u8>,
+		ext: E,
+	) -> ExecResult {
+		execute_internal(wat, input_data, ext, &ExportedFunction::Call, false, true)
+	}
+
+	/// Execute instantiation entry point of code without validating it first.
+	///
+	/// Same as `execute_unvalidated` except that the `deploy` entry point is ran.
+	#[cfg(not(feature = "runtime-benchmarks"))]
+	fn execute_instantiate_unvalidated<E: BorrowMut<MockExt>>(
+		wat: &str,
+		input_data: Vec<u8>,
+		ext: E,
+	) -> ExecResult {
+		execute_internal(wat, input_data, ext, &ExportedFunction::Constructor, false, true)
 	}
 
 	const CODE_TRANSFER: &str = r#"
@@ -556,6 +829,52 @@ mod tests {
 	}
 
 	#[test]
+	fn contract_delegate_call() {
+		const CODE: &str = r#"
+(module
+	;; seal_delegate_call(
+	;;    flags: u32,
+	;;    code_hash_ptr: u32,
+	;;    input_data_ptr: u32,
+	;;    input_data_len: u32,
+	;;    output_ptr: u32,
+	;;    output_len_ptr: u32
+	;;) -> u32
+	(import "seal0" "seal_delegate_call" (func $seal_delegate_call (param i32 i32 i32 i32 i32 i32) (result i32)))
+	(import "env" "memory" (memory 1 1))
+	(func (export "call")
+		(drop
+			(call $seal_delegate_call
+				(i32.const 0) ;; No flags are set
+				(i32.const 4)  ;; Pointer to "callee" code_hash.
+				(i32.const 36) ;; Pointer to input data buffer address
+				(i32.const 4)  ;; Length of input data buffer
+				(i32.const 4294967295) ;; u32 max value is the sentinel value: do not copy output
+				(i32.const 0) ;; Length is ignored in this case
+			)
+		)
+	)
+	(func (export "deploy"))
+
+	;; Callee code_hash
+	(data (i32.const 4)
+		"\11\11\11\11\11\11\11\11\11\11\11\11\11\11\11\11"
+		"\11\11\11\11\11\11\11\11\11\11\11\11\11\11\11\11"
+	)
+
+	(data (i32.const 36) "\01\02\03\04")
+)
+"#;
+		let mut mock_ext = MockExt::default();
+		assert_ok!(execute(CODE, vec![], &mut mock_ext));
+
+		assert_eq!(
+			&mock_ext.code_calls,
+			&[CallCodeEntry { code_hash: [0x11; 32].into(), data: vec![1, 2, 3, 4] }]
+		);
+	}
+
+	#[test]
 	fn contract_call_forward_input() {
 		const CODE: &str = r#"
 (module
@@ -598,10 +917,7 @@ mod tests {
 "#;
 		let mut mock_ext = MockExt::default();
 		let input = vec![0xff, 0x2a, 0x99, 0x88];
-		frame_support::assert_err!(
-			execute(CODE, input.clone(), &mut mock_ext),
-			<Error<Test>>::InputForwarded,
-		);
+		assert_err!(execute(CODE, input.clone(), &mut mock_ext), <Error<Test>>::InputForwarded,);
 
 		assert_eq!(
 			&mock_ext.calls,
@@ -657,7 +973,7 @@ mod tests {
 		let mut mock_ext = MockExt::default();
 		let input = vec![0xff, 0x2a, 0x99, 0x88];
 		let result = execute(CODE, input.clone(), &mut mock_ext).unwrap();
-		assert_eq!(result.data.0, input);
+		assert_eq!(result.data, input);
 		assert_eq!(
 			&mock_ext.calls,
 			&[CallEntry { to: ALICE, value: 0x2a, data: input, allows_reentry: true }]
@@ -709,6 +1025,83 @@ mod tests {
 			&mock_ext.calls,
 			&[CallEntry { to: ALICE, value: 0x2a, data: input, allows_reentry: false }]
 		);
+	}
+
+	#[test]
+	fn contains_storage_works() {
+		const CODE: &str = r#"
+(module
+	(import "seal0" "seal_return" (func $seal_return (param i32 i32 i32)))
+	(import "seal0" "seal_input" (func $seal_input (param i32 i32)))
+	(import "seal1" "contains_storage" (func $contains_storage (param i32 i32) (result i32)))
+	(import "env" "memory" (memory 1 1))
+
+
+	;; size of input buffer
+	;; [0, 4) size of input buffer (128+32 = 160 bytes = 0xA0)
+	(data (i32.const 0) "\A0")
+
+	;; [4, 164) input buffer
+
+	(func (export "call")
+		;; Receive key
+		(call $seal_input
+			(i32.const 4)	;; Where we take input and store it
+			(i32.const 0)	;; Where we take and store the length of the data
+		)
+		;; Call seal_clear_storage and save what it returns at 0
+		(i32.store (i32.const 0)
+			(call $contains_storage
+				(i32.const 8)			;; key_ptr
+				(i32.load (i32.const 4))	;; key_len
+			)
+		)
+		(call $seal_return
+			(i32.const 0)	;; flags
+			(i32.const 0)	;; returned value
+			(i32.const 4)	;; length of returned value
+		)
+	)
+
+	(func (export "deploy"))
+)
+"#;
+
+		let mut ext = MockExt::default();
+		ext.set_storage_transparent(
+			&VarSizedKey::<Test>::try_from([1u8; 64].to_vec()).unwrap(),
+			Some(vec![42u8]),
+			false,
+		)
+		.unwrap();
+		ext.set_storage_transparent(
+			&VarSizedKey::<Test>::try_from([2u8; 19].to_vec()).unwrap(),
+			Some(vec![]),
+			false,
+		)
+		.unwrap();
+
+		//value does not exist (wrong key length)
+		let input = (63, [1u8; 64]).encode();
+		let result = execute(CODE, input, &mut ext).unwrap();
+		// sentinel returned
+		assert_eq!(u32::from_le_bytes(result.data.try_into().unwrap()), crate::SENTINEL);
+
+		// value exists
+		let input = (64, [1u8; 64]).encode();
+		let result = execute(CODE, input, &mut ext).unwrap();
+		// true as u32 returned
+		assert_eq!(u32::from_le_bytes(result.data.try_into().unwrap()), 1);
+		// getter does not remove the value from storage
+		assert_eq!(ext.storage.get(&[1u8; 64].to_vec()).unwrap(), &[42u8]);
+
+		// value exists (test for 0 sized)
+		let input = (19, [2u8; 19]).encode();
+		let result = execute(CODE, input, &mut ext).unwrap();
+		// true as u32 returned
+		assert_eq!(u32::from_le_bytes(result.data.try_into().unwrap()), 0);
+		// getter does not remove the value from storage
+		assert_eq!(ext.storage.get(&[2u8; 19].to_vec()).unwrap(), &([] as [u8; 0]));
 	}
 
 	const CODE_INSTANTIATE: &str = r#"
@@ -875,7 +1268,6 @@ mod tests {
 		);
 	}
 
-	#[cfg(feature = "unstable-interface")]
 	const CODE_ECDSA_RECOVER: &str = r#"
 (module
 	;; seal_ecdsa_recover(
@@ -883,7 +1275,7 @@ mod tests {
 	;;    message_hash_ptr: u32,
 	;;    output_ptr: u32
 	;; ) -> u32
-	(import "__unstable__" "seal_ecdsa_recover" (func $seal_ecdsa_recover (param i32 i32 i32) (result i32)))
+	(import "seal0" "seal_ecdsa_recover" (func $seal_ecdsa_recover (param i32 i32 i32) (result i32)))
 	(import "env" "memory" (memory 1 1))
 	(func (export "call")
 		(drop
@@ -913,11 +1305,45 @@ mod tests {
 "#;
 
 	#[test]
-	#[cfg(feature = "unstable-interface")]
 	fn contract_ecdsa_recover() {
 		let mut mock_ext = MockExt::default();
 		assert_ok!(execute(&CODE_ECDSA_RECOVER, vec![], &mut mock_ext));
 		assert_eq!(mock_ext.ecdsa_recover.into_inner(), [([1; 65], [1; 32])]);
+	}
+
+	#[test]
+	fn contract_ecdsa_to_eth_address() {
+		/// calls `seal_ecdsa_to_eth_address` for the contstant and ensures the result equals the
+		/// expected one.
+		const CODE_ECDSA_TO_ETH_ADDRESS: &str = r#"
+(module
+	(import "seal0" "seal_ecdsa_to_eth_address" (func $seal_ecdsa_to_eth_address (param i32 i32) (result i32)))
+	(import "seal0" "seal_return" (func $seal_return (param i32 i32 i32)))
+	(import "env" "memory" (memory 1 1))
+
+	(func (export "call")
+		;; fill the buffer with the eth address.
+		(call $seal_ecdsa_to_eth_address (i32.const 0) (i32.const 0))
+
+		;; Return the contents of the buffer
+		(call $seal_return
+			(i32.const 0)
+			(i32.const 0)
+			(i32.const 20)
+		)
+
+		;; seal_return doesn't return, so this is effectively unreachable.
+		(unreachable)
+	)
+	(func (export "deploy"))
+)
+"#;
+
+		let output = execute(CODE_ECDSA_TO_ETH_ADDRESS, vec![], MockExt::default()).unwrap();
+		assert_eq!(
+			output,
+			ExecReturnValue { flags: ReturnFlags::empty(), data: [0x02; 20].to_vec() }
+		);
 	}
 
 	const CODE_GET_STORAGE: &str = r#"
@@ -932,8 +1358,8 @@ mod tests {
 		"\11\11\11\11\11\11\11\11\11\11\11\11\11\11\11\11"
 	)
 
-	;; [32, 36) buffer size = 128 bytes
-	(data (i32.const 32) "\80")
+	;; [32, 36) buffer size = 4k in little endian
+	(data (i32.const 32) "\00\10")
 
 	;; [36; inf) buffer where the result is copied
 
@@ -987,17 +1413,17 @@ mod tests {
 	#[test]
 	fn get_storage_puts_data_into_buf() {
 		let mut mock_ext = MockExt::default();
-		mock_ext.storage.insert([0x11; 32], [0x22; 32].to_vec());
+		mock_ext.storage.insert([0x11; 32].to_vec(), [0x22; 32].to_vec());
 
 		let output = execute(CODE_GET_STORAGE, vec![], mock_ext).unwrap();
 
 		assert_eq!(
 			output,
-			ExecReturnValue { flags: ReturnFlags::empty(), data: Bytes([0x22; 32].to_vec()) }
+			ExecReturnValue { flags: ReturnFlags::empty(), data: [0x22; 32].to_vec() }
 		);
 	}
 
-	/// calls `seal_caller` and compares the result with the constant 42.
+	/// calls `seal_caller` and compares the result with the constant (ALICE's address part).
 	const CODE_CALLER: &str = r#"
 (module
 	(import "seal0" "seal_caller" (func $seal_caller (param i32 i32)))
@@ -1027,7 +1453,7 @@ mod tests {
 			)
 		)
 
-		;; assert that the first 64 byte are the beginning of "ALICE"
+		;; assert that the first 8 bytes are the beginning of "ALICE"
 		(call $assert
 			(i64.eq
 				(i64.load (i32.const 0))
@@ -1045,7 +1471,7 @@ mod tests {
 		assert_ok!(execute(CODE_CALLER, vec![], MockExt::default()));
 	}
 
-	/// calls `seal_address` and compares the result with the constant 69.
+	/// calls `seal_address` and compares the result with the constant (BOB's address part).
 	const CODE_ADDRESS: &str = r#"
 (module
 	(import "seal0" "seal_address" (func $seal_address (param i32 i32)))
@@ -1075,7 +1501,7 @@ mod tests {
 			)
 		)
 
-		;; assert that the first 64 byte are the beginning of "BOB"
+		;; assert that the first 8 bytes are the beginning of "BOB"
 		(call $assert
 			(i64.eq
 				(i64.load (i32.const 0))
@@ -1231,10 +1657,11 @@ mod tests {
 
 		let output = execute(CODE_GAS_LEFT, vec![], &mut ext).unwrap();
 
-		let gas_left = Weight::decode(&mut &*output.data).unwrap();
+		let OldWeight(gas_left) = OldWeight::decode(&mut &*output.data).unwrap();
 		let actual_left = ext.gas_meter.gas_left();
-		assert!(gas_left < gas_limit, "gas_left must be less than initial");
-		assert!(gas_left > actual_left, "gas_left must be greater than final");
+		// TODO: account for proof size weight
+		assert!(gas_left < gas_limit.ref_time(), "gas_left must be less than initial");
+		assert!(gas_left > actual_left.ref_time(), "gas_left must be greater than final");
 	}
 
 	const CODE_VALUE_TRANSFERRED: &str = r#"
@@ -1283,38 +1710,32 @@ mod tests {
 		assert_ok!(execute(CODE_VALUE_TRANSFERRED, vec![], MockExt::default()));
 	}
 
-	const CODE_RETURN_FROM_START_FN: &str = r#"
+	const START_FN_ILLEGAL: &str = r#"
 (module
 	(import "seal0" "seal_return" (func $seal_return (param i32 i32 i32)))
 	(import "env" "memory" (memory 1 1))
 
 	(start $start)
 	(func $start
-		(call $seal_return
-			(i32.const 0)
-			(i32.const 8)
-			(i32.const 4)
-		)
 		(unreachable)
 	)
 
 	(func (export "call")
 		(unreachable)
 	)
-	(func (export "deploy"))
+
+	(func (export "deploy")
+		(unreachable)
+	)
 
 	(data (i32.const 8) "\01\02\03\04")
 )
 "#;
 
 	#[test]
-	fn return_from_start_fn() {
-		let output = execute(CODE_RETURN_FROM_START_FN, vec![], MockExt::default()).unwrap();
-
-		assert_eq!(
-			output,
-			ExecReturnValue { flags: ReturnFlags::empty(), data: Bytes(vec![1, 2, 3, 4]) }
-		);
+	fn start_fn_illegal() {
+		let output = execute(START_FN_ILLEGAL, vec![], MockExt::default());
+		assert_err!(output, <Error<Test>>::CodeRejected,);
 	}
 
 	const CODE_TIMESTAMP_NOW: &str = r#"
@@ -1358,9 +1779,51 @@ mod tests {
 )
 "#;
 
+	const CODE_TIMESTAMP_NOW_UNPREFIXED: &str = r#"
+(module
+	(import "seal0" "now" (func $now (param i32 i32)))
+	(import "env" "memory" (memory 1 1))
+
+	;; size of our buffer is 32 bytes
+	(data (i32.const 32) "\20")
+
+	(func $assert (param i32)
+		(block $ok
+			(br_if $ok
+				(get_local 0)
+			)
+			(unreachable)
+		)
+	)
+
+	(func (export "call")
+		;; This stores the block timestamp in the buffer
+		(call $now (i32.const 0) (i32.const 32))
+
+		;; assert len == 8
+		(call $assert
+			(i32.eq
+				(i32.load (i32.const 32))
+				(i32.const 8)
+			)
+		)
+
+		;; assert that contents of the buffer is equal to the i64 value of 1111.
+		(call $assert
+			(i64.eq
+				(i64.load (i32.const 0))
+				(i64.const 1111)
+			)
+		)
+	)
+	(func (export "deploy"))
+)
+"#;
+
 	#[test]
 	fn now() {
 		assert_ok!(execute(CODE_TIMESTAMP_NOW, vec![], MockExt::default()));
+		assert_ok!(execute(CODE_TIMESTAMP_NOW_UNPREFIXED, vec![], MockExt::default()));
 	}
 
 	const CODE_MINIMUM_BALANCE: &str = r#"
@@ -1464,17 +1927,16 @@ mod tests {
 
 	#[test]
 	fn random() {
-		let output = execute(CODE_RANDOM, vec![], MockExt::default()).unwrap();
+		let output = execute_unvalidated(CODE_RANDOM, vec![], MockExt::default()).unwrap();
 
 		// The mock ext just returns the same data that was passed as the subject.
 		assert_eq!(
 			output,
 			ExecReturnValue {
 				flags: ReturnFlags::empty(),
-				data: Bytes(
-					hex!("000102030405060708090A0B0C0D0E0F000102030405060708090A0B0C0D0E0F")
-						.to_vec()
-				),
+				data: array_bytes::hex_into_unchecked(
+					"000102030405060708090A0B0C0D0E0F000102030405060708090A0B0C0D0E0F"
+				)
 			},
 		);
 	}
@@ -1535,20 +1997,20 @@ mod tests {
 
 	#[test]
 	fn random_v1() {
-		let output = execute(CODE_RANDOM_V1, vec![], MockExt::default()).unwrap();
+		let output = execute_unvalidated(CODE_RANDOM_V1, vec![], MockExt::default()).unwrap();
 
 		// The mock ext just returns the same data that was passed as the subject.
 		assert_eq!(
 			output,
 			ExecReturnValue {
 				flags: ReturnFlags::empty(),
-				data: Bytes(
-					(
-						hex!("000102030405060708090A0B0C0D0E0F000102030405060708090A0B0C0D0E0F"),
-						42u64,
-					)
-						.encode()
-				),
+				data: (
+					array_bytes::hex2array_unchecked::<32>(
+						"000102030405060708090A0B0C0D0E0F000102030405060708090A0B0C0D0E0F"
+					),
+					42u64,
+				)
+					.encode()
 			},
 		);
 	}
@@ -1589,7 +2051,53 @@ mod tests {
 			)]
 		);
 
-		assert!(mock_ext.gas_meter.gas_left() > 0);
+		assert!(mock_ext.gas_meter.gas_left().ref_time() > 0);
+	}
+
+	const CODE_DEPOSIT_EVENT_DUPLICATES: &str = r#"
+(module
+	(import "seal0" "seal_deposit_event" (func $seal_deposit_event (param i32 i32 i32 i32)))
+	(import "env" "memory" (memory 1 1))
+
+	(func (export "call")
+		(call $seal_deposit_event
+			(i32.const 32) ;; Pointer to the start of topics buffer
+			(i32.const 129) ;; The length of the topics buffer.
+			(i32.const 8) ;; Pointer to the start of the data buffer
+			(i32.const 13) ;; Length of the buffer
+		)
+	)
+	(func (export "deploy"))
+
+	(data (i32.const 8) "\00\01\2A\00\00\00\00\00\00\00\E5\14\00")
+
+	;; Encoded Vec<TopicOf<T>>, the buffer has length of 129 bytes.
+	(data (i32.const 32) "\10"
+"\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01"
+"\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02"
+"\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01"
+"\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04")
+)
+"#;
+
+	/// Checks that the runtime allows duplicate topics.
+	#[test]
+	fn deposit_event_duplicates_allowed() {
+		let mut mock_ext = MockExt::default();
+		assert_ok!(execute(CODE_DEPOSIT_EVENT_DUPLICATES, vec![], &mut mock_ext,));
+
+		assert_eq!(
+			mock_ext.events,
+			vec![(
+				vec![
+					H256::repeat_byte(0x01),
+					H256::repeat_byte(0x02),
+					H256::repeat_byte(0x01),
+					H256::repeat_byte(0x04)
+				],
+				vec![0x00, 0x01, 0x2a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe5, 0x14, 0x00]
+			)]
+		);
 	}
 
 	const CODE_DEPOSIT_EVENT_MAX_TOPICS: &str = r#"
@@ -1626,44 +2134,6 @@ mod tests {
 			execute(CODE_DEPOSIT_EVENT_MAX_TOPICS, vec![], MockExt::default(),),
 			Err(ExecError {
 				error: Error::<Test>::TooManyTopics.into(),
-				origin: ErrorOrigin::Caller,
-			})
-		);
-	}
-
-	const CODE_DEPOSIT_EVENT_DUPLICATES: &str = r#"
-(module
-	(import "seal0" "seal_deposit_event" (func $seal_deposit_event (param i32 i32 i32 i32)))
-	(import "env" "memory" (memory 1 1))
-
-	(func (export "call")
-		(call $seal_deposit_event
-			(i32.const 32) ;; Pointer to the start of topics buffer
-			(i32.const 129) ;; The length of the topics buffer.
-			(i32.const 8) ;; Pointer to the start of the data buffer
-			(i32.const 13) ;; Length of the buffer
-		)
-	)
-	(func (export "deploy"))
-
-	(data (i32.const 8) "\00\01\2A\00\00\00\00\00\00\00\E5\14\00")
-
-	;; Encoded Vec<TopicOf<T>>, the buffer has length of 129 bytes.
-	(data (i32.const 32) "\10"
-"\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01"
-"\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02\02"
-"\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01\01"
-"\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04\04")
-)
-"#;
-
-	/// Checks that the runtime traps if there are duplicates.
-	#[test]
-	fn deposit_event_duplicates() {
-		assert_eq!(
-			execute(CODE_DEPOSIT_EVENT_DUPLICATES, vec![], MockExt::default(),),
-			Err(ExecError {
-				error: Error::<Test>::DuplicateTopics.into(),
 				origin: ErrorOrigin::Caller,
 			})
 		);
@@ -1753,7 +2223,7 @@ mod tests {
 	fn seal_return_with_success_status() {
 		let output = execute(
 			CODE_RETURN_WITH_DATA,
-			hex!("00000000445566778899").to_vec(),
+			array_bytes::hex2bytes_unchecked("00000000445566778899"),
 			MockExt::default(),
 		)
 		.unwrap();
@@ -1762,7 +2232,7 @@ mod tests {
 			output,
 			ExecReturnValue {
 				flags: ReturnFlags::empty(),
-				data: Bytes(hex!("445566778899").to_vec()),
+				data: array_bytes::hex2bytes_unchecked("445566778899"),
 			}
 		);
 		assert!(!output.did_revert());
@@ -1770,15 +2240,18 @@ mod tests {
 
 	#[test]
 	fn return_with_revert_status() {
-		let output =
-			execute(CODE_RETURN_WITH_DATA, hex!("010000005566778899").to_vec(), MockExt::default())
-				.unwrap();
+		let output = execute(
+			CODE_RETURN_WITH_DATA,
+			array_bytes::hex2bytes_unchecked("010000005566778899"),
+			MockExt::default(),
+		)
+		.unwrap();
 
 		assert_eq!(
 			output,
 			ExecReturnValue {
 				flags: ReturnFlags::REVERT,
-				data: Bytes(hex!("5566778899").to_vec()),
+				data: array_bytes::hex2bytes_unchecked("5566778899"),
 			}
 		);
 		assert!(output.did_revert());
@@ -1896,10 +2369,9 @@ mod tests {
 		);
 	}
 
-	#[cfg(feature = "unstable-interface")]
 	const CODE_CALL_RUNTIME: &str = r#"
 (module
-	(import "__unstable__" "seal_call_runtime" (func $seal_call_runtime (param i32 i32) (result i32)))
+	(import "seal0" "call_runtime" (func $call_runtime (param i32 i32) (result i32)))
 	(import "seal0" "seal_input" (func $seal_input (param i32 i32)))
 	(import "seal0" "seal_return" (func $seal_return (param i32 i32 i32)))
 	(import "env" "memory" (memory 1 1))
@@ -1916,7 +2388,7 @@ mod tests {
 		)
 		;; Just use the call passed as input and store result to memory
 		(i32.store (i32.const 0)
-			(call $seal_call_runtime
+			(call $call_runtime
 				(i32.const 4)				;; Pointer where the call is stored
 				(i32.load (i32.const 0))	;; Size of the call
 			)
@@ -1933,18 +2405,17 @@ mod tests {
 "#;
 
 	#[test]
-	#[cfg(feature = "unstable-interface")]
 	fn call_runtime_works() {
-		let call = Call::System(frame_system::Call::remark { remark: b"Hello World".to_vec() });
+		let call =
+			RuntimeCall::System(frame_system::Call::remark { remark: b"Hello World".to_vec() });
 		let mut ext = MockExt::default();
 		let result = execute(CODE_CALL_RUNTIME, call.encode(), &mut ext).unwrap();
 		assert_eq!(*ext.runtime_calls.borrow(), vec![call]);
 		// 0 = ReturnCode::Success
-		assert_eq!(u32::from_le_bytes(result.data.0.try_into().unwrap()), 0);
+		assert_eq!(u32::from_le_bytes(result.data.try_into().unwrap()), 0);
 	}
 
 	#[test]
-	#[cfg(feature = "unstable-interface")]
 	fn call_runtime_panics_on_invalid_call() {
 		let mut ext = MockExt::default();
 		let result = execute(CODE_CALL_RUNTIME, vec![0x42], &mut ext);
@@ -1956,5 +2427,768 @@ mod tests {
 			})
 		);
 		assert_eq!(*ext.runtime_calls.borrow(), vec![]);
+	}
+
+	#[test]
+	fn set_storage_works() {
+		const CODE: &str = r#"
+(module
+	(import "seal0" "seal_input" (func $seal_input (param i32 i32)))
+	(import "seal0" "seal_return" (func $seal_return (param i32 i32 i32)))
+	(import "seal2" "set_storage" (func $set_storage (param i32 i32 i32 i32) (result i32)))
+	(import "env" "memory" (memory 1 1))
+
+	;; [0, 4) size of input buffer
+	;; 4k in little endian
+	(data (i32.const 0) "\00\10")
+
+	;; [4, 4100) input buffer
+
+	(func (export "call")
+		;; Receive (key ++ value_to_write)
+		(call $seal_input
+			(i32.const 4)	;; Pointer to the input buffer
+			(i32.const 0)	;; Size of the input buffer
+		)
+		;; Store the passed value to the passed key and store result to memory
+		(i32.store (i32.const 168)
+			(call $set_storage
+				(i32.const 8)				;; key_ptr
+				(i32.load (i32.const 4))		;; key_len
+				(i32.add				;; value_ptr = 8 + key_len
+					(i32.const 8)
+					(i32.load (i32.const 4)))
+				(i32.sub				;; value_len (input_size - (key_len + key_len_len))
+					(i32.load (i32.const 0))
+					(i32.add
+						(i32.load (i32.const 4))
+						(i32.const 4)
+					)
+				)
+			)
+		)
+		(call $seal_return
+			(i32.const 0)	;; flags
+			(i32.const 168)	;; ptr to returned value
+			(i32.const 4)	;; length of returned value
+		)
+	)
+
+	(func (export "deploy"))
+)
+"#;
+
+		let mut ext = MockExt::default();
+
+		// value did not exist before -> sentinel returned
+		let input = (32, [1u8; 32], [42u8, 48]).encode();
+		let result = execute(CODE, input, &mut ext).unwrap();
+		assert_eq!(u32::from_le_bytes(result.data.try_into().unwrap()), crate::SENTINEL);
+		assert_eq!(ext.storage.get(&[1u8; 32].to_vec()).unwrap(), &[42u8, 48]);
+
+		// value do exist -> length of old value returned
+		let input = (32, [1u8; 32], [0u8; 0]).encode();
+		let result = execute(CODE, input, &mut ext).unwrap();
+		assert_eq!(u32::from_le_bytes(result.data.try_into().unwrap()), 2);
+		assert_eq!(ext.storage.get(&[1u8; 32].to_vec()).unwrap(), &[0u8; 0]);
+
+		// value do exist -> length of old value returned (test for zero sized val)
+		let input = (32, [1u8; 32], [99u8]).encode();
+		let result = execute(CODE, input, &mut ext).unwrap();
+		assert_eq!(u32::from_le_bytes(result.data.try_into().unwrap()), 0);
+		assert_eq!(ext.storage.get(&[1u8; 32].to_vec()).unwrap(), &[99u8]);
+	}
+
+	#[test]
+	fn get_storage_works() {
+		const CODE: &str = r#"
+(module
+	(import "seal0" "seal_input" (func $seal_input (param i32 i32)))
+	(import "seal0" "seal_return" (func $seal_return (param i32 i32 i32)))
+	(import "seal1" "get_storage" (func $get_storage (param i32 i32 i32 i32) (result i32)))
+	(import "env" "memory" (memory 1 1))
+
+	;; [0, 4) size of input buffer (160 bytes as we copy the key+len here)
+	(data (i32.const 0) "\A0")
+
+	;; [4, 8) size of output buffer
+	;; 4k in little endian
+	(data (i32.const 4) "\00\10")
+
+	;; [8, 168) input buffer
+	;; [168, 4264) output buffer
+
+	(func (export "call")
+		;; Receive (key ++ value_to_write)
+		(call $seal_input
+			(i32.const 8)	;; Pointer to the input buffer
+			(i32.const 0)	;; Size of the input buffer
+		)
+		;; Load a storage value and result of this call into the output buffer
+		(i32.store (i32.const 168)
+			(call $get_storage
+				(i32.const 12)			;; key_ptr
+				(i32.load (i32.const 8))	;; key_len
+				(i32.const 172)			;; Pointer to the output buffer
+				(i32.const 4)			;; Pointer to the size of the buffer
+			)
+		)
+		(call $seal_return
+			(i32.const 0)				;; flags
+			(i32.const 168)				;; output buffer ptr
+			(i32.add				;; length: output size + 4 (retval)
+				(i32.load (i32.const 4))
+				(i32.const 4)
+			)
+		)
+	)
+
+	(func (export "deploy"))
+)
+"#;
+
+		let mut ext = MockExt::default();
+
+		ext.set_storage_transparent(
+			&VarSizedKey::<Test>::try_from([1u8; 64].to_vec()).unwrap(),
+			Some(vec![42u8]),
+			false,
+		)
+		.unwrap();
+
+		ext.set_storage_transparent(
+			&VarSizedKey::<Test>::try_from([2u8; 19].to_vec()).unwrap(),
+			Some(vec![]),
+			false,
+		)
+		.unwrap();
+
+		// value does not exist
+		let input = (63, [1u8; 64]).encode();
+		let result = execute(CODE, input, &mut ext).unwrap();
+		assert_eq!(
+			u32::from_le_bytes(result.data[0..4].try_into().unwrap()),
+			ReturnCode::KeyNotFound as u32
+		);
+
+		// value exists
+		let input = (64, [1u8; 64]).encode();
+		let result = execute(CODE, input, &mut ext).unwrap();
+		assert_eq!(
+			u32::from_le_bytes(result.data[0..4].try_into().unwrap()),
+			ReturnCode::Success as u32
+		);
+		assert_eq!(ext.storage.get(&[1u8; 64].to_vec()).unwrap(), &[42u8]);
+		assert_eq!(&result.data[4..], &[42u8]);
+
+		// value exists (test for 0 sized)
+		let input = (19, [2u8; 19]).encode();
+		let result = execute(CODE, input, &mut ext).unwrap();
+		assert_eq!(
+			u32::from_le_bytes(result.data[0..4].try_into().unwrap()),
+			ReturnCode::Success as u32
+		);
+		assert_eq!(ext.storage.get(&[2u8; 19].to_vec()), Some(&vec![]));
+		assert_eq!(&result.data[4..], &([] as [u8; 0]));
+	}
+
+	#[test]
+	fn clear_storage_works() {
+		const CODE: &str = r#"
+(module
+	(import "seal0" "seal_input" (func $seal_input (param i32 i32)))
+	(import "seal0" "seal_return" (func $seal_return (param i32 i32 i32)))
+	(import "seal1" "clear_storage" (func $clear_storage (param i32 i32) (result i32)))
+	(import "env" "memory" (memory 1 1))
+
+	;; size of input buffer
+	;; [0, 4) size of input buffer (128+32 = 160 bytes = 0xA0)
+	(data (i32.const 0) "\A0")
+
+	;; [4, 164) input buffer
+
+	(func (export "call")
+		;; Receive key
+		(call $seal_input
+			(i32.const 4)	;; Where we take input and store it
+			(i32.const 0)	;; Where we take and store the length of thedata
+		)
+		;; Call seal_clear_storage and save what it returns at 0
+		(i32.store (i32.const 0)
+			(call $clear_storage
+				(i32.const 8)			;; key_ptr
+				(i32.load (i32.const 4))	;; key_len
+			)
+		)
+		(call $seal_return
+			(i32.const 0)	;; flags
+			(i32.const 0)	;; returned value
+			(i32.const 4)	;; length of returned value
+		)
+	)
+
+	(func (export "deploy"))
+)
+"#;
+
+		let mut ext = MockExt::default();
+
+		ext.set_storage_transparent(
+			&VarSizedKey::<Test>::try_from([1u8; 64].to_vec()).unwrap(),
+			Some(vec![42u8]),
+			false,
+		)
+		.unwrap();
+		ext.set_storage_transparent(
+			&VarSizedKey::<Test>::try_from([2u8; 19].to_vec()).unwrap(),
+			Some(vec![]),
+			false,
+		)
+		.unwrap();
+
+		// value did not exist
+		let input = (32, [3u8; 32]).encode();
+		let result = execute(CODE, input, &mut ext).unwrap();
+		// sentinel returned
+		assert_eq!(u32::from_le_bytes(result.data.try_into().unwrap()), crate::SENTINEL);
+		assert_eq!(ext.storage.get(&[3u8; 32].to_vec()), None);
+
+		// value did exist
+		let input = (64, [1u8; 64]).encode();
+		let result = execute(CODE, input, &mut ext).unwrap();
+		// length returned
+		assert_eq!(u32::from_le_bytes(result.data.try_into().unwrap()), 1);
+		// value cleared
+		assert_eq!(ext.storage.get(&[1u8; 64].to_vec()), None);
+
+		//value did not exist (wrong key length)
+		let input = (63, [1u8; 64]).encode();
+		let result = execute(CODE, input, &mut ext).unwrap();
+		// sentinel returned
+		assert_eq!(u32::from_le_bytes(result.data.try_into().unwrap()), crate::SENTINEL);
+		assert_eq!(ext.storage.get(&[1u8; 64].to_vec()), None);
+
+		// value exists
+		let input = (19, [2u8; 19]).encode();
+		let result = execute(CODE, input, &mut ext).unwrap();
+		// length returned (test for 0 sized)
+		assert_eq!(u32::from_le_bytes(result.data.try_into().unwrap()), 0);
+		// value cleared
+		assert_eq!(ext.storage.get(&[2u8; 19].to_vec()), None);
+	}
+
+	#[test]
+	fn take_storage_works() {
+		const CODE: &str = r#"
+(module
+	(import "seal0" "seal_return" (func $seal_return (param i32 i32 i32)))
+	(import "seal0" "seal_input" (func $seal_input (param i32 i32)))
+	(import "seal0" "take_storage" (func $take_storage (param i32 i32 i32 i32) (result i32)))
+	(import "env" "memory" (memory 1 1))
+
+	;; [0, 4) size of input buffer (160 bytes as we copy the key+len here)
+	(data (i32.const 0) "\A0")
+
+	;; [4, 8) size of output buffer
+	;; 4k in little endian
+	(data (i32.const 4) "\00\10")
+
+	;; [8, 168) input buffer
+	;; [168, 4264) output buffer
+
+	(func (export "call")
+		;; Receive key
+		(call $seal_input
+			(i32.const 8)	;; Pointer to the input buffer
+			(i32.const 0)	;; Size of the length buffer
+		)
+
+		;; Load a storage value and result of this call into the output buffer
+		(i32.store (i32.const 168)
+			(call $take_storage
+				(i32.const 12)			;; key_ptr
+				(i32.load (i32.const 8))	;; key_len
+				(i32.const 172)			;; Pointer to the output buffer
+				(i32.const 4)			;; Pointer to the size of the buffer
+			)
+		)
+
+		;; Return the contents of the buffer
+		(call $seal_return
+			(i32.const 0)				;; flags
+			(i32.const 168)				;; output buffer ptr
+			(i32.add				;; length: storage size + 4 (retval)
+				(i32.load (i32.const 4))
+				(i32.const 4)
+			)
+		)
+	)
+
+	(func (export "deploy"))
+)
+"#;
+
+		let mut ext = MockExt::default();
+
+		ext.set_storage_transparent(
+			&VarSizedKey::<Test>::try_from([1u8; 64].to_vec()).unwrap(),
+			Some(vec![42u8]),
+			false,
+		)
+		.unwrap();
+
+		ext.set_storage_transparent(
+			&VarSizedKey::<Test>::try_from([2u8; 19].to_vec()).unwrap(),
+			Some(vec![]),
+			false,
+		)
+		.unwrap();
+
+		// value does not exist -> error returned
+		let input = (63, [1u8; 64]).encode();
+		let result = execute(CODE, input, &mut ext).unwrap();
+		assert_eq!(
+			u32::from_le_bytes(result.data[0..4].try_into().unwrap()),
+			ReturnCode::KeyNotFound as u32
+		);
+
+		// value did exist -> value returned
+		let input = (64, [1u8; 64]).encode();
+		let result = execute(CODE, input, &mut ext).unwrap();
+		assert_eq!(
+			u32::from_le_bytes(result.data[0..4].try_into().unwrap()),
+			ReturnCode::Success as u32
+		);
+		assert_eq!(ext.storage.get(&[1u8; 64].to_vec()), None);
+		assert_eq!(&result.data[4..], &[42u8]);
+
+		// value did exist -> length returned (test for 0 sized)
+		let input = (19, [2u8; 19]).encode();
+		let result = execute(CODE, input, &mut ext).unwrap();
+		assert_eq!(
+			u32::from_le_bytes(result.data[0..4].try_into().unwrap()),
+			ReturnCode::Success as u32
+		);
+		assert_eq!(ext.storage.get(&[2u8; 19].to_vec()), None);
+		assert_eq!(&result.data[4..], &[0u8; 0]);
+	}
+
+	#[test]
+	fn is_contract_works() {
+		const CODE_IS_CONTRACT: &str = r#"
+;; This runs `is_contract` check on zero account address
+(module
+	(import "seal0" "seal_is_contract" (func $seal_is_contract (param i32) (result i32)))
+	(import "seal0" "seal_return" (func $seal_return (param i32 i32 i32)))
+	(import "env" "memory" (memory 1 1))
+
+	;; [0, 32) zero-adress
+	(data (i32.const 0)
+		"\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00"
+		"\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00"
+	)
+
+	;; [32, 36) here we store the return code of the `seal_is_contract`
+
+	(func (export "deploy"))
+
+	(func (export "call")
+		(i32.store
+			(i32.const 32)
+			(call $seal_is_contract
+				(i32.const 0) ;; ptr to destination address
+			)
+		)
+		;; exit with success and take `seal_is_contract` return code to the output buffer
+		(call $seal_return (i32.const 0) (i32.const 32) (i32.const 4))
+	)
+)
+"#;
+		let output = execute(CODE_IS_CONTRACT, vec![], MockExt::default()).unwrap();
+
+		// The mock ext just always returns 1u32 (`true`).
+		assert_eq!(output, ExecReturnValue { flags: ReturnFlags::empty(), data: 1u32.encode() },);
+	}
+
+	#[test]
+	fn code_hash_works() {
+		/// calls `seal_code_hash` and compares the result with the constant.
+		const CODE_CODE_HASH: &str = r#"
+(module
+	(import "seal0" "seal_code_hash" (func $seal_code_hash (param i32 i32 i32) (result i32)))
+	(import "env" "memory" (memory 1 1))
+
+	;; size of our buffer is 32 bytes
+	(data (i32.const 32) "\20")
+
+	(func $assert (param i32)
+		(block $ok
+			(br_if $ok
+				(get_local 0)
+			)
+			(unreachable)
+		)
+	)
+
+	(func (export "call")
+		;; fill the buffer with the code hash.
+		(call $seal_code_hash
+			(i32.const 0) ;; input: address_ptr (before call)
+			(i32.const 0) ;; output: code_hash_ptr (after call)
+			(i32.const 32) ;; same 32 bytes length for input and output
+		)
+
+		;; assert size == 32
+		(call $assert
+			(i32.eq
+				(i32.load (i32.const 32))
+				(i32.const 32)
+			)
+		)
+
+		;; assert that the first 8 bytes are "1111111111111111"
+		(call $assert
+			(i64.eq
+				(i64.load (i32.const 0))
+				(i64.const 0x1111111111111111)
+			)
+		)
+		drop
+	)
+
+	(func (export "deploy"))
+)
+"#;
+		assert_ok!(execute(CODE_CODE_HASH, vec![], MockExt::default()));
+	}
+
+	#[test]
+	fn own_code_hash_works() {
+		/// calls `seal_own_code_hash` and compares the result with the constant.
+		const CODE_OWN_CODE_HASH: &str = r#"
+(module
+	(import "seal0" "seal_own_code_hash" (func $seal_own_code_hash (param i32 i32)))
+	(import "env" "memory" (memory 1 1))
+
+	;; size of our buffer is 32 bytes
+	(data (i32.const 32) "\20")
+
+	(func $assert (param i32)
+		(block $ok
+			(br_if $ok
+				(get_local 0)
+			)
+			(unreachable)
+		)
+	)
+
+	(func (export "call")
+		;; fill the buffer with the code hash
+		(call $seal_own_code_hash
+			(i32.const 0)  ;; output: code_hash_ptr
+			(i32.const 32) ;; 32 bytes length of code_hash output
+		)
+
+		;; assert size == 32
+		(call $assert
+			(i32.eq
+				(i32.load (i32.const 32))
+				(i32.const 32)
+			)
+		)
+
+		;; assert that the first 8 bytes are "1010101010101010"
+		(call $assert
+			(i64.eq
+				(i64.load (i32.const 0))
+				(i64.const 0x1010101010101010)
+			)
+		)
+	)
+
+	(func (export "deploy"))
+)
+"#;
+		assert_ok!(execute(CODE_OWN_CODE_HASH, vec![], MockExt::default()));
+	}
+
+	#[test]
+	fn caller_is_origin_works() {
+		const CODE_CALLER_IS_ORIGIN: &str = r#"
+;; This runs `caller_is_origin` check on zero account address
+(module
+	(import "seal0" "seal_caller_is_origin" (func $seal_caller_is_origin (result i32)))
+	(import "seal0" "seal_return" (func $seal_return (param i32 i32 i32)))
+	(import "env" "memory" (memory 1 1))
+
+	;; [0, 4) here the return code of the `seal_caller_is_origin` will be stored
+	;; we initialize it with non-zero value to be sure that it's being overwritten below
+	(data (i32.const 0) "\10\10\10\10")
+
+	(func (export "deploy"))
+
+	(func (export "call")
+		(i32.store
+			(i32.const 0)
+			(call $seal_caller_is_origin)
+		)
+		;; exit with success and take `seal_caller_is_origin` return code to the output buffer
+		(call $seal_return (i32.const 0) (i32.const 0) (i32.const 4))
+	)
+)
+"#;
+		let output = execute(CODE_CALLER_IS_ORIGIN, vec![], MockExt::default()).unwrap();
+
+		// The mock ext just always returns 0u32 (`false`)
+		assert_eq!(output, ExecReturnValue { flags: ReturnFlags::empty(), data: 0u32.encode() },);
+	}
+
+	#[test]
+	fn set_code_hash() {
+		const CODE: &str = r#"
+(module
+	(import "seal0" "seal_set_code_hash" (func $seal_set_code_hash (param i32) (result i32)))
+	(import "env" "memory" (memory 1 1))
+	(func $assert (param i32)
+		(block $ok
+			(br_if $ok
+				(get_local 0)
+			)
+			(unreachable)
+		)
+	)
+	(func (export "call")
+		(local $exit_code i32)
+		(set_local $exit_code
+			(call $seal_set_code_hash (i32.const 0))
+		)
+		(call $assert
+			(i32.eq (get_local $exit_code) (i32.const 0)) ;; ReturnCode::Success
+		)
+	)
+
+	(func (export "deploy"))
+
+	;; Hash of code.
+	(data (i32.const 0)
+		"\11\11\11\11\11\11\11\11\11\11\11\11\11\11\11\11"
+		"\11\11\11\11\11\11\11\11\11\11\11\11\11\11\11\11"
+	)
+)
+"#;
+
+		let mut mock_ext = MockExt::default();
+		execute(CODE, [0u8; 32].encode(), &mut mock_ext).unwrap();
+
+		assert_eq!(mock_ext.code_hashes.pop().unwrap(), H256::from_slice(&[17u8; 32]));
+	}
+
+	#[test]
+	fn reentrance_count_works() {
+		const CODE: &str = r#"
+(module
+	(import "seal0" "reentrance_count" (func $reentrance_count (result i32)))
+	(import "env" "memory" (memory 1 1))
+	(func $assert (param i32)
+		(block $ok
+			(br_if $ok
+				(get_local 0)
+			)
+			(unreachable)
+		)
+	)
+	(func (export "call")
+		(local $return_val i32)
+		(set_local $return_val
+			(call $reentrance_count)
+		)
+		(call $assert
+			(i32.eq (get_local $return_val) (i32.const 12))
+		)
+	)
+
+	(func (export "deploy"))
+)
+"#;
+
+		let mut mock_ext = MockExt::default();
+		execute(CODE, vec![], &mut mock_ext).unwrap();
+	}
+
+	#[test]
+	fn account_reentrance_count_works() {
+		const CODE: &str = r#"
+(module
+	(import "seal0" "account_reentrance_count" (func $account_reentrance_count (param i32) (result i32)))
+	(import "env" "memory" (memory 1 1))
+	(func $assert (param i32)
+		(block $ok
+			(br_if $ok
+				(get_local 0)
+			)
+			(unreachable)
+		)
+	)
+	(func (export "call")
+		(local $return_val i32)
+		(set_local $return_val
+			(call $account_reentrance_count (i32.const 0))
+		)
+		(call $assert
+			(i32.eq (get_local $return_val) (i32.const 12))
+		)
+	)
+
+	(func (export "deploy"))
+)
+"#;
+
+		let mut mock_ext = MockExt::default();
+		execute(CODE, vec![], &mut mock_ext).unwrap();
+	}
+
+	#[test]
+	fn instantiation_nonce_works() {
+		const CODE: &str = r#"
+(module
+	(import "seal0" "instantiation_nonce" (func $nonce (result i64)))
+	(func $assert (param i32)
+		(block $ok
+			(br_if $ok
+				(get_local 0)
+			)
+			(unreachable)
+		)
+	)
+	(func (export "call")
+		(call $assert
+			(i64.eq (call $nonce) (i64.const 995))
+		)
+	)
+	(func (export "deploy"))
+)
+"#;
+
+		let mut mock_ext = MockExt::default();
+		execute(CODE, vec![], &mut mock_ext).unwrap();
+	}
+
+	/// Code with deprecated functions cannot be uploaded or instantiated. However, we
+	/// need to make sure that it still can be re-instrumented.
+	#[test]
+	fn can_reinstrument_deprecated() {
+		const CODE_RANDOM: &str = r#"
+(module
+	(import "seal0" "random" (func $seal_random (param i32 i32 i32 i32)))
+	(func (export "call"))
+	(func (export "deploy"))
+)
+	"#;
+		let wasm = wat::parse_str(CODE_RANDOM).unwrap();
+		let schedule = crate::Schedule::<Test>::default();
+		#[cfg(not(feature = "runtime-benchmarks"))]
+		assert_err!(execute(CODE_RANDOM, vec![], MockExt::default()), <Error<Test>>::CodeRejected);
+		self::prepare::reinstrument::<runtime::Env, Test>(
+			&wasm,
+			&schedule,
+			Determinism::Deterministic,
+		)
+		.unwrap();
+	}
+
+	/// This test check that an unstable interface cannot be deployed. In case of runtime
+	/// benchmarks we always allow unstable interfaces. This is why this test does not
+	/// work when this feature is enabled.
+	#[cfg(not(feature = "runtime-benchmarks"))]
+	#[test]
+	fn cannot_deploy_unstable() {
+		const CANNOT_DEPLOY_UNSTABLE: &str = r#"
+(module
+	(import "seal0" "reentrance_count" (func $reentrance_count (result i32)))
+	(func (export "call"))
+	(func (export "deploy"))
+)
+"#;
+		assert_err!(
+			execute_no_unstable(CANNOT_DEPLOY_UNSTABLE, vec![], MockExt::default()),
+			<Error<Test>>::CodeRejected,
+		);
+		assert_ok!(execute(CANNOT_DEPLOY_UNSTABLE, vec![], MockExt::default()));
+	}
+
+	/// The random interface is deprecated and hence new contracts using it should not be deployed.
+	/// In case of runtime benchmarks we always allow deprecated interfaces. This is why this
+	/// test doesn't work if this feature is enabled.
+	#[cfg(not(feature = "runtime-benchmarks"))]
+	#[test]
+	fn cannot_deploy_deprecated() {
+		const CODE_RANDOM_0: &str = r#"
+(module
+	(import "seal0" "seal_random" (func $seal_random (param i32 i32 i32 i32)))
+	(func (export "call"))
+	(func (export "deploy"))
+)
+	"#;
+		const CODE_RANDOM_1: &str = r#"
+(module
+	(import "seal1" "seal_random" (func $seal_random (param i32 i32 i32 i32)))
+	(func (export "call"))
+	(func (export "deploy"))
+)
+	"#;
+		const CODE_RANDOM_2: &str = r#"
+(module
+	(import "seal0" "random" (func $seal_random (param i32 i32 i32 i32)))
+	(func (export "call"))
+	(func (export "deploy"))
+)
+	"#;
+		const CODE_RANDOM_3: &str = r#"
+(module
+	(import "seal1" "random" (func $seal_random (param i32 i32 i32 i32)))
+	(func (export "call"))
+	(func (export "deploy"))
+)
+	"#;
+
+		assert_ok!(execute_unvalidated(CODE_RANDOM_0, vec![], MockExt::default()));
+		assert_err!(
+			execute_instantiate_unvalidated(CODE_RANDOM_0, vec![], MockExt::default()),
+			<Error<Test>>::CodeRejected,
+		);
+		assert_err!(
+			execute(CODE_RANDOM_0, vec![], MockExt::default()),
+			<Error<Test>>::CodeRejected,
+		);
+
+		assert_ok!(execute_unvalidated(CODE_RANDOM_1, vec![], MockExt::default()));
+		assert_err!(
+			execute_instantiate_unvalidated(CODE_RANDOM_1, vec![], MockExt::default()),
+			<Error<Test>>::CodeRejected,
+		);
+		assert_err!(
+			execute(CODE_RANDOM_1, vec![], MockExt::default()),
+			<Error<Test>>::CodeRejected,
+		);
+
+		assert_ok!(execute_unvalidated(CODE_RANDOM_2, vec![], MockExt::default()));
+		assert_err!(
+			execute_instantiate_unvalidated(CODE_RANDOM_2, vec![], MockExt::default()),
+			<Error<Test>>::CodeRejected,
+		);
+		assert_err!(
+			execute(CODE_RANDOM_2, vec![], MockExt::default()),
+			<Error<Test>>::CodeRejected,
+		);
+
+		assert_ok!(execute_unvalidated(CODE_RANDOM_3, vec![], MockExt::default()));
+		assert_err!(
+			execute_instantiate_unvalidated(CODE_RANDOM_3, vec![], MockExt::default()),
+			<Error<Test>>::CodeRejected,
+		);
+		assert_err!(
+			execute(CODE_RANDOM_3, vec![], MockExt::default()),
+			<Error<Test>>::CodeRejected,
+		);
 	}
 }

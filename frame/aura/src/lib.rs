@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -40,8 +40,9 @@
 
 use codec::{Decode, Encode, MaxEncodedLen};
 use frame_support::{
+	log,
 	traits::{DisabledValidators, FindAuthor, Get, OnTimestampSet, OneSessionHandler},
-	BoundedSlice, ConsensusEngineId, Parameter, WeakBoundedVec,
+	BoundedSlice, BoundedVec, ConsensusEngineId, Parameter,
 };
 use sp_consensus_aura::{AuthorityIndex, ConsensusLog, Slot, AURA_ENGINE_ID};
 use sp_runtime::{
@@ -56,6 +57,8 @@ mod mock;
 mod tests;
 
 pub use pallet::*;
+
+const LOG_TARGET: &str = "runtime::aura";
 
 #[frame_support::pallet]
 pub mod pallet {
@@ -81,7 +84,6 @@ pub mod pallet {
 	}
 
 	#[pallet::pallet]
-	#[pallet::generate_storage_info]
 	pub struct Pallet<T>(sp_std::marker::PhantomData<T>);
 
 	#[pallet::hooks]
@@ -117,7 +119,7 @@ pub mod pallet {
 	#[pallet::storage]
 	#[pallet::getter(fn authorities)]
 	pub(super) type Authorities<T: Config> =
-		StorageValue<_, WeakBoundedVec<T::AuthorityId, T::MaxAuthorities>, ValueQuery>;
+		StorageValue<_, BoundedVec<T::AuthorityId, T::MaxAuthorities>, ValueQuery>;
 
 	/// The current slot of this block.
 	///
@@ -147,17 +149,34 @@ pub mod pallet {
 }
 
 impl<T: Config> Pallet<T> {
-	fn change_authorities(new: WeakBoundedVec<T::AuthorityId, T::MaxAuthorities>) {
+	/// Change authorities.
+	///
+	/// The storage will be applied immediately.
+	/// And aura consensus log will be appended to block's log.
+	///
+	/// This is a no-op if `new` is empty.
+	pub fn change_authorities(new: BoundedVec<T::AuthorityId, T::MaxAuthorities>) {
+		if new.is_empty() {
+			log::warn!(target: LOG_TARGET, "Ignoring empty authority change.");
+
+			return
+		}
+
 		<Authorities<T>>::put(&new);
 
 		let log = DigestItem::Consensus(
 			AURA_ENGINE_ID,
 			ConsensusLog::AuthoritiesChange(new.into_inner()).encode(),
 		);
-		<frame_system::Pallet<T>>::deposit_log(log.into());
+		<frame_system::Pallet<T>>::deposit_log(log);
 	}
 
-	fn initialize_authorities(authorities: &[T::AuthorityId]) {
+	/// Initial authorities.
+	///
+	/// The storage will be applied immediately.
+	///
+	/// The authorities length must be equal or less than T::MaxAuthorities.
+	pub fn initialize_authorities(authorities: &[T::AuthorityId]) {
 		if !authorities.is_empty() {
 			assert!(<Authorities<T>>::get().is_empty(), "Authorities are already initialized!");
 			let bounded = <BoundedSlice<'_, _, T::MaxAuthorities>>::try_from(authorities)
@@ -211,10 +230,14 @@ impl<T: Config> OneSessionHandler<T::AccountId> for Pallet<T> {
 			let next_authorities = validators.map(|(_, k)| k).collect::<Vec<_>>();
 			let last_authorities = Self::authorities();
 			if last_authorities != next_authorities {
-				let bounded = <WeakBoundedVec<_, T::MaxAuthorities>>::force_from(
-					next_authorities,
-					Some("AuRa new session"),
-				);
+				if next_authorities.len() as u32 > T::MaxAuthorities::get() {
+					log::warn!(
+						target: LOG_TARGET,
+						"next authorities list larger than {}, truncating",
+						T::MaxAuthorities::get(),
+					);
+				}
+				let bounded = <BoundedVec<_, T::MaxAuthorities>>::truncate_from(next_authorities);
 				Self::change_authorities(bounded);
 			}
 		}
@@ -226,7 +249,7 @@ impl<T: Config> OneSessionHandler<T::AccountId> for Pallet<T> {
 			ConsensusLog::<T::AuthorityId>::OnDisabled(i as AuthorityIndex).encode(),
 		);
 
-		<frame_system::Pallet<T>>::deposit_log(log.into());
+		<frame_system::Pallet<T>>::deposit_log(log);
 	}
 }
 
@@ -262,7 +285,7 @@ impl<T: Config, Inner: FindAuthor<u32>> FindAuthor<T::AuthorityId>
 		let i = Inner::find_author(digests)?;
 
 		let validators = <Pallet<T>>::authorities();
-		validators.get(i as usize).map(|k| k.clone())
+		validators.get(i as usize).cloned()
 	}
 }
 

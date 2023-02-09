@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2020-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2020-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,7 +20,7 @@
 #![cfg(feature = "runtime-benchmarks")]
 
 use super::*;
-use frame_benchmarking::{benchmarks, TrackedStorageKey};
+use frame_benchmarking::v1::{benchmarks, TrackedStorageKey};
 use frame_support::{ensure, traits::OnFinalize};
 use frame_system::RawOrigin;
 
@@ -56,5 +56,5 @@ benchmarks! {
 		ensure!(!DidUpdate::<T>::exists(), "Time was not removed.");
 	}
 
-	impl_benchmark_test_suite!(Timestamp, crate::tests::new_test_ext(), crate::tests::Test);
+	impl_benchmark_test_suite!(Timestamp, crate::mock::new_test_ext(), crate::mock::Test);
 }

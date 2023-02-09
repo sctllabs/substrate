@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -19,19 +19,22 @@
 //! Service configuration.
 
 pub use sc_client_api::execution_extensions::{ExecutionStrategies, ExecutionStrategy};
-pub use sc_client_db::{Database, DatabaseSource, KeepBlocks, PruningMode, TransactionStorageMode};
-pub use sc_executor::WasmExecutionMethod;
+pub use sc_client_db::{BlocksPruning, Database, DatabaseSource, PruningMode};
+pub use sc_executor::{WasmExecutionMethod, WasmtimeInstantiationStrategy};
 pub use sc_network::{
-	config::{
-		IncomingRequest, MultiaddrWithPeerId, NetworkConfiguration, NodeKeyConfig,
-		NonDefaultSetConfig, OutgoingResponse, RequestResponseConfig, Role, SetConfig,
-		TransportConfig,
-	},
+	config::{NetworkConfiguration, NodeKeyConfig, Role},
 	Multiaddr,
+};
+pub use sc_network_common::{
+	config::{MultiaddrWithPeerId, NonDefaultSetConfig, ProtocolId, SetConfig, TransportConfig},
+	request_responses::{
+		IncomingRequest, OutgoingResponse, ProtocolConfig as RequestResponseConfig,
+	},
 };
 
 use prometheus_endpoint::Registry;
 use sc_chain_spec::ChainSpec;
+use sc_network::config::SyncMode;
 pub use sc_telemetry::TelemetryEndpoints;
 pub use sc_transaction_pool::Options as TransactionPoolOptions;
 use sp_core::crypto::SecretString;
@@ -63,16 +66,16 @@ pub struct Configuration {
 	pub keystore_remote: Option<String>,
 	/// Configuration for the database.
 	pub database: DatabaseSource,
-	/// Size of internal state cache in Bytes
-	pub state_cache_size: usize,
-	/// Size in percent of cache size dedicated to child tries
-	pub state_cache_child_ratio: Option<usize>,
+	/// Maximum size of internal trie cache in bytes.
+	///
+	/// If `None` is given the cache is disabled.
+	pub trie_cache_maximum_size: Option<usize>,
 	/// State pruning settings.
-	pub state_pruning: PruningMode,
+	pub state_pruning: Option<PruningMode>,
 	/// Number of blocks to keep in the db.
-	pub keep_blocks: KeepBlocks,
-	/// Transaction storage scheme.
-	pub transaction_storage: TransactionStorageMode,
+	///
+	/// NOTE: only finalized blocks are subject for removal!
+	pub blocks_pruning: BlocksPruning,
 	/// Chain configuration.
 	pub chain_spec: Box<dyn ChainSpec>,
 	/// Wasm execution method.
@@ -97,6 +100,18 @@ pub struct Configuration {
 	pub rpc_methods: RpcMethods,
 	/// Maximum payload of rpc request/responses.
 	pub rpc_max_payload: Option<usize>,
+	/// Maximum payload of a rpc request
+	pub rpc_max_request_size: Option<usize>,
+	/// Maximum payload of a rpc request
+	pub rpc_max_response_size: Option<usize>,
+	/// Custom JSON-RPC subscription ID provider.
+	///
+	/// Default: [`crate::RandomStringSubscriptionId`].
+	pub rpc_id_provider: Option<Box<dyn crate::RpcSubscriptionIdProvider>>,
+	/// Maximum allowed subscriptions per rpc connection
+	///
+	/// Default: 1024.
+	pub rpc_max_subs_per_conn: Option<usize>,
 	/// Maximum size of the output buffer capacity for websocket connections.
 	pub ws_max_out_buffer_capacity: Option<usize>,
 	/// Prometheus endpoint configuration. `None` if disabled.
@@ -210,7 +225,7 @@ impl Configuration {
 	}
 
 	/// Returns the network protocol id from the chain spec, or the default.
-	pub fn protocol_id(&self) -> sc_network::config::ProtocolId {
+	pub fn protocol_id(&self) -> ProtocolId {
 		let protocol_id_full = match self.chain_spec.protocol_id() {
 			Some(pid) => pid,
 			None => {
@@ -222,7 +237,23 @@ impl Configuration {
 				crate::DEFAULT_PROTOCOL_ID
 			},
 		};
-		sc_network::config::ProtocolId::from(protocol_id_full)
+		ProtocolId::from(protocol_id_full)
+	}
+
+	/// Returns true if the genesis state writting will be skipped while initializing the genesis
+	/// block.
+	pub fn no_genesis(&self) -> bool {
+		matches!(self.network.sync_mode, SyncMode::Fast { .. } | SyncMode::Warp { .. })
+	}
+
+	/// Returns the database config for creating the backend.
+	pub fn db_config(&self) -> sc_client_db::DatabaseSettings {
+		sc_client_db::DatabaseSettings {
+			trie_cache_maximum_size: self.trie_cache_maximum_size,
+			state_pruning: self.state_pruning.clone(),
+			source: self.database.clone(),
+			blocks_pruning: self.blocks_pruning,
+		}
 	}
 }
 
@@ -244,31 +275,43 @@ impl Default for RpcMethods {
 	}
 }
 
-/// The base path that is used for everything that needs to be write on disk to run a node.
+#[static_init::dynamic(drop, lazy)]
+static mut BASE_PATH_TEMP: Option<TempDir> = None;
+
+/// The base path that is used for everything that needs to be written on disk to run a node.
 #[derive(Debug)]
-pub enum BasePath {
-	/// A temporary directory is used as base path and will be deleted when dropped.
-	Temporary(TempDir),
-	/// A path on the disk.
-	Permanenent(PathBuf),
+pub struct BasePath {
+	path: PathBuf,
 }
 
 impl BasePath {
 	/// Create a `BasePath` instance using a temporary directory prefixed with "substrate" and use
 	/// it as base path.
 	///
-	/// Note: the temporary directory will be created automatically and deleted when the `BasePath`
-	/// instance is dropped.
+	/// Note: The temporary directory will be created automatically and deleted when the program
+	/// exits. Every call to this function will return the same path for the lifetime of the
+	/// program.
 	pub fn new_temp_dir() -> io::Result<BasePath> {
-		Ok(BasePath::Temporary(tempfile::Builder::new().prefix("substrate").tempdir()?))
+		let mut temp = BASE_PATH_TEMP.write();
+
+		match &*temp {
+			Some(p) => Ok(Self::new(p.path())),
+			None => {
+				let temp_dir = tempfile::Builder::new().prefix("substrate").tempdir()?;
+				let path = PathBuf::from(temp_dir.path());
+
+				*temp = Some(temp_dir);
+				Ok(Self::new(path))
+			},
+		}
 	}
 
 	/// Create a `BasePath` instance based on an existing path on disk.
 	///
 	/// Note: this function will not ensure that the directory exist nor create the directory. It
 	/// will also not delete the directory when the instance is dropped.
-	pub fn new<P: AsRef<Path>>(path: P) -> BasePath {
-		BasePath::Permanenent(path.as_ref().to_path_buf())
+	pub fn new<P: Into<PathBuf>>(path: P) -> BasePath {
+		Self { path: path.into() }
 	}
 
 	/// Create a base path from values describing the project.
@@ -282,10 +325,7 @@ impl BasePath {
 
 	/// Retrieve the base path.
 	pub fn path(&self) -> &Path {
-		match self {
-			BasePath::Temporary(temp_dir) => temp_dir.path(),
-			BasePath::Permanenent(path) => path.as_path(),
-		}
+		&self.path
 	}
 
 	/// Returns the configuration directory inside this base path.
@@ -296,7 +336,7 @@ impl BasePath {
 	}
 }
 
-impl std::convert::From<PathBuf> for BasePath {
+impl From<PathBuf> for BasePath {
 	fn from(path: PathBuf) -> Self {
 		BasePath::new(path)
 	}

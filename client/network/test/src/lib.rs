@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -23,15 +23,14 @@ mod block_import;
 mod sync;
 
 use std::{
-	borrow::Cow,
 	collections::HashMap,
+	marker::PhantomData,
 	pin::Pin,
 	sync::Arc,
 	task::{Context as FutureContext, Poll},
 	time::Duration,
 };
 
-use async_std::future::timeout;
 use futures::{future::BoxFuture, prelude::*};
 use libp2p::{build_multiaddr, PeerId};
 use log::trace;
@@ -44,27 +43,34 @@ use sc_client_api::{
 };
 use sc_consensus::{
 	BasicQueue, BlockCheckParams, BlockImport, BlockImportParams, BoxJustificationImport,
-	ForkChoiceStrategy, ImportResult, JustificationImport, LongestChain, Verifier,
+	ForkChoiceStrategy, ImportQueue, ImportResult, JustificationImport, JustificationSyncLink,
+	LongestChain, Verifier,
 };
-pub use sc_network::config::EmptyTransactionPool;
 use sc_network::{
-	block_request_handler::BlockRequestHandler,
+	config::{NetworkConfiguration, RequestResponseConfig, Role, SyncMode},
+	Multiaddr, NetworkService, NetworkWorker,
+};
+use sc_network_common::{
 	config::{
-		MultiaddrWithPeerId, NetworkConfiguration, NonDefaultSetConfig, NonReservedPeerMode,
-		ProtocolConfig, ProtocolId, Role, SyncMode, TransportConfig,
+		MultiaddrWithPeerId, NonDefaultSetConfig, NonReservedPeerMode, ProtocolId, TransportConfig,
 	},
-	light_client_requests::handler::LightClientRequestHandler,
-	state_request_handler::StateRequestHandler,
-	warp_request_handler, Multiaddr, NetworkService, NetworkWorker,
+	protocol::{role::Roles, ProtocolName},
+	service::{NetworkBlock, NetworkStateInfo, NetworkSyncForkRequest},
+	sync::warp::{AuthorityList, EncodedProof, SetId, VerificationResult, WarpSyncProvider},
+};
+use sc_network_light::light_client_requests::handler::LightClientRequestHandler;
+use sc_network_sync::{
+	block_request_handler::BlockRequestHandler, service::network::NetworkServiceProvider,
+	state_request_handler::StateRequestHandler, warp_request_handler, ChainSync,
 };
 use sc_service::client::Client;
 use sp_blockchain::{
 	well_known_cache_keys::{self, Id as CacheKeyId},
-	HeaderBackend, Info as BlockchainInfo, Result as ClientResult,
+	Backend as BlockchainBackend, HeaderBackend, Info as BlockchainInfo, Result as ClientResult,
 };
 use sp_consensus::{
 	block_validation::{BlockAnnounceValidator, DefaultBlockAnnounceValidator},
-	BlockOrigin, Error as ConsensusError,
+	BlockOrigin, Error as ConsensusError, SyncOracle,
 };
 use sp_core::H256;
 use sp_runtime::{
@@ -78,6 +84,7 @@ pub use substrate_test_runtime_client::{
 	runtime::{Block, Extrinsic, Hash, Transfer},
 	TestClient, TestClientBuilder, TestClientBuilderExt,
 };
+use tokio::time::timeout;
 
 type AuthorityId = sp_consensus_babe::AuthorityId;
 
@@ -86,7 +93,6 @@ type AuthorityId = sp_consensus_babe::AuthorityId;
 #[derive(Clone)]
 pub struct PassThroughVerifier {
 	finalized: bool,
-	fork_choice: ForkChoiceStrategy,
 }
 
 impl PassThroughVerifier {
@@ -94,15 +100,7 @@ impl PassThroughVerifier {
 	///
 	/// Every verified block will use `finalized` for the `BlockImportParams`.
 	pub fn new(finalized: bool) -> Self {
-		Self { finalized, fork_choice: ForkChoiceStrategy::LongestChain }
-	}
-
-	/// Create a new instance.
-	///
-	/// Every verified block will use `finalized` for the `BlockImportParams` and
-	/// the given [`ForkChoiceStrategy`].
-	pub fn new_with_fork_choice(finalized: bool, fork_choice: ForkChoiceStrategy) -> Self {
-		Self { finalized, fork_choice }
+		Self { finalized }
 	}
 }
 
@@ -121,8 +119,10 @@ impl<B: BlockT> Verifier<B> for PassThroughVerifier {
 					.or_else(|| l.try_as_raw(OpaqueDigestItemId::Consensus(b"babe")))
 			})
 			.map(|blob| vec![(well_known_cache_keys::AUTHORITIES, blob.to_vec())]);
+		if block.fork_choice.is_none() {
+			block.fork_choice = Some(ForkChoiceStrategy::LongestChain);
+		};
 		block.finalized = self.finalized;
-		block.fork_choice = Some(self.fork_choice.clone());
 		Ok((block, maybe_keys))
 	}
 }
@@ -163,21 +163,30 @@ impl PeersClient {
 
 	pub fn header(
 		&self,
-		block: &BlockId<Block>,
+		hash: <Block as BlockT>::Hash,
 	) -> ClientResult<Option<<Block as BlockT>::Header>> {
-		self.client.header(block)
+		self.client.header(hash)
 	}
 
 	pub fn has_state_at(&self, block: &BlockId<Block>) -> bool {
-		let header = match self.header(block).unwrap() {
-			Some(header) => header,
-			None => return false,
+		let (number, hash) = match *block {
+			BlockId::Hash(h) => match self.as_client().number(h) {
+				Ok(Some(n)) => (n, h),
+				_ => return false,
+			},
+			BlockId::Number(n) => match self.as_client().hash(n) {
+				Ok(Some(h)) => (n, h),
+				_ => return false,
+			},
 		};
-		self.backend.have_state_at(&header.hash(), *header.number())
+		self.backend.have_state_at(hash, number)
 	}
 
-	pub fn justifications(&self, block: &BlockId<Block>) -> ClientResult<Option<Justifications>> {
-		self.client.justifications(block)
+	pub fn justifications(
+		&self,
+		hash: <Block as BlockT>::Hash,
+	) -> ClientResult<Option<Justifications>> {
+		self.client.justifications(hash)
 	}
 
 	pub fn finality_notification_stream(&self) -> FinalityNotifications<Block> {
@@ -190,11 +199,11 @@ impl PeersClient {
 
 	pub fn finalize_block(
 		&self,
-		id: BlockId<Block>,
+		hash: <Block as BlockT>::Hash,
 		justification: Option<Justification>,
 		notify: bool,
 	) -> ClientResult<()> {
-		self.client.finalize_block(id, justification, notify)
+		self.client.finalize_block(hash, justification, notify)
 	}
 }
 
@@ -230,7 +239,7 @@ pub struct Peer<D, BlockImport> {
 	block_import: BlockImportAdapter<BlockImport>,
 	select_chain: Option<LongestChain<substrate_test_runtime_client::Backend, Block>>,
 	backend: Option<Arc<substrate_test_runtime_client::Backend>>,
-	network: NetworkWorker<Block, <Block as BlockT>::Hash>,
+	network: NetworkWorker<Block, <Block as BlockT>::Hash, PeersFullClient>,
 	imported_blocks_stream: Pin<Box<dyn Stream<Item = BlockImportNotification<Block>> + Send>>,
 	finality_notification_stream: Pin<Box<dyn Stream<Item = FinalityNotification<Block>> + Send>>,
 	listen_addr: Multiaddr,
@@ -243,7 +252,7 @@ where
 {
 	/// Get this peer ID.
 	pub fn id(&self) -> PeerId {
-		self.network.service().local_peer_id().clone()
+		self.network.service().local_peer_id()
 	}
 
 	/// Returns true if we're major syncing.
@@ -294,7 +303,12 @@ where
 	}
 
 	/// Add blocks to the peer -- edit the block before adding
-	pub fn generate_blocks<F>(&mut self, count: usize, origin: BlockOrigin, edit_block: F) -> H256
+	pub fn generate_blocks<F>(
+		&mut self,
+		count: usize,
+		origin: BlockOrigin,
+		edit_block: F,
+	) -> Vec<H256>
 	where
 		F: FnMut(
 			BlockBuilder<Block, PeersFullClient, substrate_test_runtime_client::Backend>,
@@ -309,12 +323,39 @@ where
 			false,
 			true,
 			true,
+			ForkChoiceStrategy::LongestChain,
+		)
+	}
+
+	/// Add blocks to the peer -- edit the block before adding and use custom fork choice rule.
+	pub fn generate_blocks_with_fork_choice<F>(
+		&mut self,
+		count: usize,
+		origin: BlockOrigin,
+		edit_block: F,
+		fork_choice: ForkChoiceStrategy,
+	) -> Vec<H256>
+	where
+		F: FnMut(
+			BlockBuilder<Block, PeersFullClient, substrate_test_runtime_client::Backend>,
+		) -> Block,
+	{
+		let best_hash = self.client.info().best_hash;
+		self.generate_blocks_at(
+			BlockId::Hash(best_hash),
+			count,
+			origin,
+			edit_block,
+			false,
+			true,
+			true,
+			fork_choice,
 		)
 	}
 
 	/// Add blocks to the peer -- edit the block before adding. The chain will
 	/// start at the given block iD.
-	fn generate_blocks_at<F>(
+	pub fn generate_blocks_at<F>(
 		&mut self,
 		at: BlockId<Block>,
 		count: usize,
@@ -323,14 +364,16 @@ where
 		headers_only: bool,
 		inform_sync_about_new_best_block: bool,
 		announce_block: bool,
-	) -> H256
+		fork_choice: ForkChoiceStrategy,
+	) -> Vec<H256>
 	where
 		F: FnMut(
 			BlockBuilder<Block, PeersFullClient, substrate_test_runtime_client::Backend>,
 		) -> Block,
 	{
+		let mut hashes = Vec::with_capacity(count);
 		let full_client = self.client.as_client();
-		let mut at = full_client.header(&at).unwrap().unwrap().hash();
+		let mut at = full_client.block_hash_from_id(&at).unwrap().unwrap();
 		for _ in 0..count {
 			let builder =
 				full_client.new_block_at(&BlockId::Hash(at), Default::default(), false).unwrap();
@@ -346,6 +389,7 @@ where
 			let header = block.header.clone();
 			let mut import_block = BlockImportParams::new(origin, header.clone());
 			import_block.body = if headers_only { None } else { Some(block.extrinsics) };
+			import_block.fork_choice = Some(fork_choice);
 			let (import_block, cache) =
 				futures::executor::block_on(self.verifier.verify(import_block)).unwrap();
 			let cache = if let Some(cache) = cache {
@@ -359,33 +403,34 @@ where
 			if announce_block {
 				self.network.service().announce_block(hash, None);
 			}
+			hashes.push(hash);
 			at = hash;
 		}
 
 		if inform_sync_about_new_best_block {
 			self.network.new_best_block_imported(
 				at,
-				full_client.header(&BlockId::Hash(at)).ok().flatten().unwrap().number().clone(),
+				*full_client.header(at).ok().flatten().unwrap().number(),
 			);
 		}
-		at
+		hashes
 	}
 
 	/// Push blocks to the peer (simplified: with or without a TX)
-	pub fn push_blocks(&mut self, count: usize, with_tx: bool) -> H256 {
+	pub fn push_blocks(&mut self, count: usize, with_tx: bool) -> Vec<H256> {
 		let best_hash = self.client.info().best_hash;
 		self.push_blocks_at(BlockId::Hash(best_hash), count, with_tx)
 	}
 
 	/// Push blocks to the peer (simplified: with or without a TX)
-	pub fn push_headers(&mut self, count: usize) -> H256 {
+	pub fn push_headers(&mut self, count: usize) -> Vec<H256> {
 		let best_hash = self.client.info().best_hash;
 		self.generate_tx_blocks_at(BlockId::Hash(best_hash), count, false, true, true, true)
 	}
 
 	/// Push blocks to the peer (simplified: with or without a TX) starting from
 	/// given hash.
-	pub fn push_blocks_at(&mut self, at: BlockId<Block>, count: usize, with_tx: bool) -> H256 {
+	pub fn push_blocks_at(&mut self, at: BlockId<Block>, count: usize, with_tx: bool) -> Vec<H256> {
 		self.generate_tx_blocks_at(at, count, with_tx, false, true, true)
 	}
 
@@ -396,8 +441,9 @@ where
 		at: BlockId<Block>,
 		count: usize,
 		with_tx: bool,
-	) -> H256 {
-		self.generate_tx_blocks_at(at, count, with_tx, false, false, true)
+		announce_block: bool,
+	) -> Vec<H256> {
+		self.generate_tx_blocks_at(at, count, with_tx, false, false, announce_block)
 	}
 
 	/// Push blocks to the peer (simplified: with or without a TX) starting from
@@ -407,7 +453,7 @@ where
 		at: BlockId<Block>,
 		count: usize,
 		with_tx: bool,
-	) -> H256 {
+	) -> Vec<H256> {
 		self.generate_tx_blocks_at(at, count, with_tx, false, true, false)
 	}
 
@@ -421,7 +467,7 @@ where
 		headers_only: bool,
 		inform_sync_about_new_best_block: bool,
 		announce_block: bool,
-	) -> H256 {
+	) -> Vec<H256> {
 		let mut nonce = 0;
 		if with_tx {
 			self.generate_blocks_at(
@@ -436,12 +482,13 @@ where
 						nonce,
 					};
 					builder.push(transfer.into_signed_tx()).unwrap();
-					nonce = nonce + 1;
+					nonce += 1;
 					builder.build().unwrap().block
 				},
 				headers_only,
 				inform_sync_about_new_best_block,
 				announce_block,
+				ForkChoiceStrategy::LongestChain,
 			)
 		} else {
 			self.generate_blocks_at(
@@ -452,11 +499,15 @@ where
 				headers_only,
 				inform_sync_about_new_best_block,
 				announce_block,
+				ForkChoiceStrategy::LongestChain,
 			)
 		}
 	}
 
-	pub fn push_authorities_change_block(&mut self, new_authorities: Vec<AuthorityId>) -> H256 {
+	pub fn push_authorities_change_block(
+		&mut self,
+		new_authorities: Vec<AuthorityId>,
+	) -> Vec<H256> {
 		self.generate_blocks(1, BlockOrigin::File, |mut builder| {
 			builder.push(Extrinsic::AuthoritiesChange(new_authorities.clone())).unwrap();
 			builder.build().unwrap().block
@@ -470,11 +521,11 @@ where
 
 	/// Get a reference to the network service.
 	pub fn network_service(&self) -> &Arc<NetworkService<Block, <Block as BlockT>::Hash>> {
-		&self.network.service()
+		self.network.service()
 	}
 
 	/// Get a reference to the network worker.
-	pub fn network(&self) -> &NetworkWorker<Block, <Block as BlockT>::Hash> {
+	pub fn network(&self) -> &NetworkWorker<Block, <Block as BlockT>::Hash, PeersFullClient> {
 		&self.network
 	}
 
@@ -501,10 +552,17 @@ where
 		self.verifier.failed_verifications.lock().clone()
 	}
 
-	pub fn has_block(&self, hash: &H256) -> bool {
+	pub fn has_block(&self, hash: H256) -> bool {
 		self.backend
 			.as_ref()
-			.map(|backend| backend.blockchain().header(BlockId::hash(*hash)).unwrap().is_some())
+			.map(|backend| backend.blockchain().header(hash).unwrap().is_some())
+			.unwrap_or(false)
+	}
+
+	pub fn has_body(&self, hash: H256) -> bool {
+		self.backend
+			.as_ref()
+			.map(|backend| backend.blockchain().body(hash).unwrap().is_some())
 			.unwrap_or(false)
 	}
 }
@@ -537,25 +595,27 @@ impl<T> BlockImportAdapterFull for T where
 /// This is required as the `TestNetFactory` trait does not distinguish between
 /// full and light nodes.
 #[derive(Clone)]
-pub struct BlockImportAdapter<I> {
+pub struct BlockImportAdapter<I, Transaction = ()> {
 	inner: I,
+	_phantom: PhantomData<Transaction>,
 }
 
-impl<I> BlockImportAdapter<I> {
+impl<I, Transaction> BlockImportAdapter<I, Transaction> {
 	/// Create a new instance of `Self::Full`.
 	pub fn new(inner: I) -> Self {
-		Self { inner }
+		Self { inner, _phantom: PhantomData }
 	}
 }
 
 #[async_trait::async_trait]
-impl<I> BlockImport<Block> for BlockImportAdapter<I>
+impl<I, Transaction> BlockImport<Block> for BlockImportAdapter<I, Transaction>
 where
 	I: BlockImport<Block, Error = ConsensusError> + Send + Sync,
 	I::Transaction: Send,
+	Transaction: Send + 'static,
 {
 	type Error = ConsensusError;
-	type Transaction = ();
+	type Transaction = Transaction;
 
 	async fn check_block(
 		&mut self,
@@ -566,7 +626,7 @@ where
 
 	async fn import_block(
 		&mut self,
-		block: BlockImportParams<Block, ()>,
+		block: BlockImportParams<Block, Self::Transaction>,
 		cache: HashMap<well_known_cache_keys::Id, Vec<u8>>,
 	) -> Result<ImportResult, Self::Error> {
 		self.inner.import_block(block.clear_storage_changes_and_mutate(), cache).await
@@ -613,27 +673,26 @@ impl<B: BlockT> VerifierAdapter<B> {
 
 struct TestWarpSyncProvider<B: BlockT>(Arc<dyn HeaderBackend<B>>);
 
-impl<B: BlockT> warp_request_handler::WarpSyncProvider<B> for TestWarpSyncProvider<B> {
+impl<B: BlockT> WarpSyncProvider<B> for TestWarpSyncProvider<B> {
 	fn generate(
 		&self,
 		_start: B::Hash,
-	) -> Result<warp_request_handler::EncodedProof, Box<dyn std::error::Error + Send + Sync>> {
+	) -> Result<EncodedProof, Box<dyn std::error::Error + Send + Sync>> {
 		let info = self.0.info();
-		let best_header = self.0.header(BlockId::hash(info.best_hash)).unwrap().unwrap();
-		Ok(warp_request_handler::EncodedProof(best_header.encode()))
+		let best_header = self.0.header(info.best_hash).unwrap().unwrap();
+		Ok(EncodedProof(best_header.encode()))
 	}
 	fn verify(
 		&self,
-		proof: &warp_request_handler::EncodedProof,
-		_set_id: warp_request_handler::SetId,
-		_authorities: warp_request_handler::AuthorityList,
-	) -> Result<warp_request_handler::VerificationResult<B>, Box<dyn std::error::Error + Send + Sync>>
-	{
-		let warp_request_handler::EncodedProof(encoded) = proof;
+		proof: &EncodedProof,
+		_set_id: SetId,
+		_authorities: AuthorityList,
+	) -> Result<VerificationResult<B>, Box<dyn std::error::Error + Send + Sync>> {
+		let EncodedProof(encoded) = proof;
 		let header = B::Header::decode(&mut encoded.as_slice()).unwrap();
-		Ok(warp_request_handler::VerificationResult::Complete(0, Default::default(), header))
+		Ok(VerificationResult::Complete(0, Default::default(), header))
 	}
-	fn current_authorities(&self) -> warp_request_handler::AuthorityList {
+	fn current_authorities(&self) -> AuthorityList {
 		Default::default()
 	}
 }
@@ -642,11 +701,15 @@ impl<B: BlockT> warp_request_handler::WarpSyncProvider<B> for TestWarpSyncProvid
 #[derive(Default)]
 pub struct FullPeerConfig {
 	/// Pruning window size.
-	pub keep_blocks: Option<u32>,
+	///
+	/// NOTE: only finalized blocks are subject for removal!
+	pub blocks_pruning: Option<u32>,
 	/// Block announce validator.
 	pub block_announce_validator: Option<Box<dyn BlockAnnounceValidator<Block> + Send + Sync>>,
 	/// List of notification protocols that the network must support.
-	pub notifications_protocols: Vec<Cow<'static, str>>,
+	pub notifications_protocols: Vec<ProtocolName>,
+	/// List of request-response protocols that the network must support.
+	pub request_response_protocols: Vec<RequestResponseConfig>,
 	/// The indices of the peers the peer should be connected to.
 	///
 	/// If `None`, it will be connected to all other peers.
@@ -661,7 +724,8 @@ pub struct FullPeerConfig {
 	pub storage_chain: bool,
 }
 
-pub trait TestNetFactory: Sized
+#[async_trait::async_trait]
+pub trait TestNetFactory: Default + Sized
 where
 	<Self::BlockImport as BlockImport<Block>>::Transaction: Send,
 {
@@ -669,14 +733,8 @@ where
 	type BlockImport: BlockImport<Block, Error = ConsensusError> + Clone + Send + Sync + 'static;
 	type PeerData: Default;
 
-	/// These two need to be implemented!
-	fn from_config(config: &ProtocolConfig) -> Self;
-	fn make_verifier(
-		&self,
-		client: PeersClient,
-		config: &ProtocolConfig,
-		peer_data: &Self::PeerData,
-	) -> Self::Verifier;
+	/// This one needs to be implemented!
+	fn make_verifier(&self, client: PeersClient, peer_data: &Self::PeerData) -> Self::Verifier;
 
 	/// Get reference to peer.
 	fn peer(&mut self, i: usize) -> &mut Peer<Self::PeerData, Self::BlockImport>;
@@ -696,15 +754,10 @@ where
 		Self::PeerData,
 	);
 
-	fn default_config() -> ProtocolConfig {
-		ProtocolConfig::default()
-	}
-
 	/// Create new test network with this many peers.
 	fn new(n: usize) -> Self {
 		trace!(target: "test_network", "Creating test network");
-		let config = Self::default_config();
-		let mut net = Self::from_config(&config);
+		let mut net = Self::default();
 
 		for i in 0..n {
 			trace!(target: "test_network", "Adding peer {}", i);
@@ -719,10 +772,10 @@ where
 
 	/// Add a full peer.
 	fn add_full_peer_with_config(&mut self, config: FullPeerConfig) {
-		let mut test_client_builder = match (config.keep_blocks, config.storage_chain) {
-			(Some(keep_blocks), true) => TestClientBuilder::with_tx_storage(keep_blocks),
+		let mut test_client_builder = match (config.blocks_pruning, config.storage_chain) {
+			(Some(blocks_pruning), true) => TestClientBuilder::with_tx_storage(blocks_pruning),
 			(None, true) => TestClientBuilder::with_tx_storage(u32::MAX),
-			(Some(keep_blocks), false) => TestClientBuilder::with_pruning_window(keep_blocks),
+			(Some(blocks_pruning), false) => TestClientBuilder::with_pruning_window(blocks_pruning),
 			(None, false) => TestClientBuilder::with_default_backend(),
 		};
 		if let Some(storage) = config.extra_storage {
@@ -740,11 +793,8 @@ where
 		let (block_import, justification_import, data) = self
 			.make_block_import(PeersClient { client: client.clone(), backend: backend.clone() });
 
-		let verifier = self.make_verifier(
-			PeersClient { client: client.clone(), backend: backend.clone() },
-			&Default::default(),
-			&data,
-		);
+		let verifier = self
+			.make_verifier(PeersClient { client: client.clone(), backend: backend.clone() }, &data);
 		let verifier = VerifierAdapter::new(verifier);
 
 		let import_queue = Box::new(BasicQueue::new(
@@ -763,6 +813,9 @@ where
 		network_config.transport = TransportConfig::MemoryOnly;
 		network_config.listen_addresses = vec![listen_addr.clone()];
 		network_config.allow_non_globals_in_dht = true;
+		network_config
+			.request_response_protocols
+			.extend(config.request_response_protocols);
 		network_config.extra_sets = config
 			.notifications_protocols
 			.into_iter()
@@ -770,6 +823,7 @@ where
 				notifications_protocol: p,
 				fallback_names: Vec::new(),
 				max_notification_size: 1024 * 1024,
+				handshake: None,
 				set_config: Default::default(),
 			})
 			.collect();
@@ -777,7 +831,7 @@ where
 			let addrs = connect_to
 				.iter()
 				.map(|v| {
-					let peer_id = self.peer(*v).network_service().local_peer_id().clone();
+					let peer_id = self.peer(*v).network_service().local_peer_id();
 					let multiaddr = self.peer(*v).listen_addr.clone();
 					MultiaddrWithPeerId { peer_id, multiaddr }
 				})
@@ -788,23 +842,25 @@ where
 
 		let protocol_id = ProtocolId::from("test-protocol-name");
 
+		let fork_id = Some(String::from("test-fork-id"));
+
 		let block_request_protocol_config = {
 			let (handler, protocol_config) =
-				BlockRequestHandler::new(&protocol_id, client.clone(), 50);
+				BlockRequestHandler::new(&protocol_id, None, client.clone(), 50);
 			self.spawn_task(handler.run().boxed());
 			protocol_config
 		};
 
 		let state_request_protocol_config = {
 			let (handler, protocol_config) =
-				StateRequestHandler::new(&protocol_id, client.clone(), 50);
+				StateRequestHandler::new(&protocol_id, None, client.clone(), 50);
 			self.spawn_task(handler.run().boxed());
 			protocol_config
 		};
 
 		let light_client_request_protocol_config = {
 			let (handler, protocol_config) =
-				LightClientRequestHandler::new(&protocol_id, client.clone());
+				LightClientRequestHandler::new(&protocol_id, None, client.clone());
 			self.spawn_task(handler.run().boxed());
 			protocol_config
 		};
@@ -812,42 +868,89 @@ where
 		let warp_sync = Arc::new(TestWarpSyncProvider(client.clone()));
 
 		let warp_protocol_config = {
-			let (handler, protocol_config) =
-				warp_request_handler::RequestHandler::new(protocol_id.clone(), warp_sync.clone());
+			let (handler, protocol_config) = warp_request_handler::RequestHandler::new(
+				protocol_id.clone(),
+				client
+					.block_hash(0u32.into())
+					.ok()
+					.flatten()
+					.expect("Genesis block exists; qed"),
+				None,
+				warp_sync.clone(),
+			);
 			self.spawn_task(handler.run().boxed());
 			protocol_config
 		};
 
+		let block_announce_validator = config
+			.block_announce_validator
+			.unwrap_or_else(|| Box::new(DefaultBlockAnnounceValidator));
+		let (chain_sync_network_provider, chain_sync_network_handle) =
+			NetworkServiceProvider::new();
+		let (chain_sync, chain_sync_service, block_announce_config) = ChainSync::new(
+			match network_config.sync_mode {
+				SyncMode::Full => sc_network_common::sync::SyncMode::Full,
+				SyncMode::Fast { skip_proofs, storage_chain_mode } =>
+					sc_network_common::sync::SyncMode::LightState {
+						skip_proofs,
+						storage_chain_mode,
+					},
+				SyncMode::Warp => sc_network_common::sync::SyncMode::Warp,
+			},
+			client.clone(),
+			protocol_id.clone(),
+			&fork_id,
+			Roles::from(if config.is_authority { &Role::Authority } else { &Role::Full }),
+			block_announce_validator,
+			network_config.max_parallel_downloads,
+			Some(warp_sync),
+			None,
+			chain_sync_network_handle,
+			import_queue.service(),
+			block_request_protocol_config.name.clone(),
+			state_request_protocol_config.name.clone(),
+			Some(warp_protocol_config.name.clone()),
+		)
+		.unwrap();
+
 		let network = NetworkWorker::new(sc_network::config::Params {
 			role: if config.is_authority { Role::Authority } else { Role::Full },
-			executor: None,
-			transactions_handler_executor: Box::new(|task| {
-				async_std::task::spawn(task);
+			executor: Box::new(|f| {
+				tokio::spawn(f);
 			}),
 			network_config,
 			chain: client.clone(),
-			transaction_pool: Arc::new(EmptyTransactionPool),
 			protocol_id,
-			import_queue,
-			block_announce_validator: config
-				.block_announce_validator
-				.unwrap_or_else(|| Box::new(DefaultBlockAnnounceValidator)),
+			fork_id,
+			chain_sync: Box::new(chain_sync),
+			chain_sync_service: Box::new(chain_sync_service.clone()),
 			metrics_registry: None,
-			block_request_protocol_config,
-			state_request_protocol_config,
-			light_client_request_protocol_config,
-			warp_sync: Some((warp_sync, warp_protocol_config)),
+			block_announce_config,
+			request_response_protocol_configs: [
+				block_request_protocol_config,
+				state_request_protocol_config,
+				light_client_request_protocol_config,
+				warp_protocol_config,
+			]
+			.to_vec(),
+			mixnet_sink: None,
 		})
 		.unwrap();
 
 		trace!(target: "test_network", "Peer identifier: {}", network.service().local_peer_id());
 
+		let service = network.service().clone();
+		tokio::spawn(async move {
+			chain_sync_network_provider.run(service).await;
+		});
+		tokio::spawn(async move {
+			import_queue.run(Box::new(chain_sync_service)).await;
+		});
+
 		self.mut_peers(move |peers| {
 			for peer in peers.iter_mut() {
-				peer.network.add_known_address(
-					network.service().local_peer_id().clone(),
-					listen_addr.clone(),
-				);
+				peer.network
+					.add_known_address(network.service().local_peer_id(), listen_addr.clone());
 			}
 
 			let imported_blocks_stream = Box::pin(client.import_notification_stream().fuse());
@@ -871,7 +974,7 @@ where
 
 	/// Used to spawn background tasks, e.g. the block request protocol handler.
 	fn spawn_task(&self, f: BoxFuture<'static, ()>) {
-		async_std::task::spawn(f);
+		tokio::spawn(f);
 	}
 
 	/// Polls the testnet until all nodes are in sync.
@@ -912,6 +1015,7 @@ where
 				return Poll::Pending
 			}
 		}
+
 		Poll::Ready(())
 	}
 
@@ -929,40 +1033,37 @@ where
 		Poll::Pending
 	}
 
-	/// Blocks the current thread until we are sync'ed.
+	/// Run the network until we are sync'ed.
 	///
 	/// Calls `poll_until_sync` repeatedly.
 	/// (If we've not synced within 10 mins then panic rather than hang.)
-	fn block_until_sync(&mut self) {
-		futures::executor::block_on(timeout(
+	async fn run_until_sync(&mut self) {
+		timeout(
 			Duration::from_secs(10 * 60),
 			futures::future::poll_fn::<(), _>(|cx| self.poll_until_sync(cx)),
-		))
+		)
+		.await
 		.expect("sync didn't happen within 10 mins");
 	}
 
-	/// Blocks the current thread until there are no pending packets.
+	/// Run the network until there are no pending packets.
 	///
 	/// Calls `poll_until_idle` repeatedly with the runtime passed as parameter.
-	fn block_until_idle(&mut self) {
-		futures::executor::block_on(futures::future::poll_fn::<(), _>(|cx| {
-			self.poll_until_idle(cx)
-		}));
+	async fn run_until_idle(&mut self) {
+		futures::future::poll_fn::<(), _>(|cx| self.poll_until_idle(cx)).await;
 	}
 
-	/// Blocks the current thread until all peers are connected to each other.
+	/// Run the network until all peers are connected to each other.
 	///
 	/// Calls `poll_until_connected` repeatedly with the runtime passed as parameter.
-	fn block_until_connected(&mut self) {
-		futures::executor::block_on(futures::future::poll_fn::<(), _>(|cx| {
-			self.poll_until_connected(cx)
-		}));
+	async fn run_until_connected(&mut self) {
+		futures::future::poll_fn::<(), _>(|cx| self.poll_until_connected(cx)).await;
 	}
 
 	/// Polls the testnet. Processes all the pending actions.
 	fn poll(&mut self, cx: &mut FutureContext) {
 		self.mut_peers(|peers| {
-			for (i, peer) in peers.into_iter().enumerate() {
+			for (i, peer) in peers.iter_mut().enumerate() {
 				trace!(target: "sync", "-- Polling {}: {}", i, peer.id());
 				if let Poll::Ready(()) = peer.network.poll_unpin(cx) {
 					panic!("NetworkWorker has terminated unexpectedly.")
@@ -976,14 +1077,10 @@ where
 					peer.network.service().announce_block(notification.hash, None);
 				}
 
-				// We poll `finality_notification_stream`, but we only take the last event.
-				let mut last = None;
-				while let Poll::Ready(Some(item)) =
+				// We poll `finality_notification_stream`.
+				while let Poll::Ready(Some(notification)) =
 					peer.finality_notification_stream.as_mut().poll_next(cx)
 				{
-					last = Some(item);
-				}
-				if let Some(notification) = last {
 					peer.network.on_block_finalized(notification.hash, notification.header);
 				}
 			}
@@ -991,16 +1088,9 @@ where
 	}
 }
 
+#[derive(Default)]
 pub struct TestNet {
 	peers: Vec<Peer<(), PeersClient>>,
-	fork_choice: ForkChoiceStrategy,
-}
-
-impl TestNet {
-	/// Create a `TestNet` that used the given fork choice rule.
-	pub fn with_fork_choice(fork_choice: ForkChoiceStrategy) -> Self {
-		Self { peers: Vec::new(), fork_choice }
-	}
 }
 
 impl TestNetFactory for TestNet {
@@ -1008,18 +1098,8 @@ impl TestNetFactory for TestNet {
 	type PeerData = ();
 	type BlockImport = PeersClient;
 
-	/// Create new test network with peers and given config.
-	fn from_config(_config: &ProtocolConfig) -> Self {
-		TestNet { peers: Vec::new(), fork_choice: ForkChoiceStrategy::LongestChain }
-	}
-
-	fn make_verifier(
-		&self,
-		_client: PeersClient,
-		_config: &ProtocolConfig,
-		_peer_data: &(),
-	) -> Self::Verifier {
-		PassThroughVerifier::new_with_fork_choice(false, self.fork_choice.clone())
+	fn make_verifier(&self, _client: PeersClient, _peer_data: &()) -> Self::Verifier {
+		PassThroughVerifier::new(false)
 	}
 
 	fn make_block_import(
@@ -1063,11 +1143,12 @@ impl JustificationImport<Block> for ForceFinalized {
 		justification: Justification,
 	) -> Result<(), Self::Error> {
 		self.0
-			.finalize_block(BlockId::Hash(hash), Some(justification), true)
-			.map_err(|_| ConsensusError::InvalidJustification.into())
+			.finalize_block(hash, Some(justification), true)
+			.map_err(|_| ConsensusError::InvalidJustification)
 	}
 }
 
+#[derive(Default)]
 pub struct JustificationTestNet(TestNet);
 
 impl TestNetFactory for JustificationTestNet {
@@ -1075,17 +1156,8 @@ impl TestNetFactory for JustificationTestNet {
 	type PeerData = ();
 	type BlockImport = PeersClient;
 
-	fn from_config(config: &ProtocolConfig) -> Self {
-		JustificationTestNet(TestNet::from_config(config))
-	}
-
-	fn make_verifier(
-		&self,
-		client: PeersClient,
-		config: &ProtocolConfig,
-		peer_data: &(),
-	) -> Self::Verifier {
-		self.0.make_verifier(client, config, peer_data)
+	fn make_verifier(&self, client: PeersClient, peer_data: &()) -> Self::Verifier {
+		self.0.make_verifier(client, peer_data)
 	}
 
 	fn peer(&mut self, i: usize) -> &mut Peer<Self::PeerData, Self::BlockImport> {

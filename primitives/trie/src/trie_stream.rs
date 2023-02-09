@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2015-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2015-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -26,8 +26,8 @@ use hash_db::Hasher;
 use sp_std::vec::Vec;
 use trie_root;
 
-#[derive(Default, Clone)]
 /// Codec-flavored TrieStream.
+#[derive(Default, Clone)]
 pub struct TrieStream {
 	/// Current node buffer.
 	buffer: Vec<u8>,
@@ -53,9 +53,8 @@ fn branch_node_bit_mask(has_children: impl Iterator<Item = bool>) -> (u8, u8) {
 }
 
 /// Create a leaf/branch node, encoding a number of nibbles.
-fn fuse_nibbles_node<'a>(nibbles: &'a [u8], kind: NodeKind) -> impl Iterator<Item = u8> + 'a {
-	let size = sp_std::cmp::min(trie_constants::NIBBLE_SIZE_BOUND, nibbles.len());
-
+fn fuse_nibbles_node(nibbles: &[u8], kind: NodeKind) -> impl Iterator<Item = u8> + '_ {
+	let size = nibbles.len();
 	let iter_start = match kind {
 		NodeKind::Leaf => size_and_prefix_iterator(size, trie_constants::LEAF_PREFIX_MASK, 2),
 		NodeKind::BranchNoValue =>

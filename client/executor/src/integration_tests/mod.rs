@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -18,11 +18,14 @@
 
 #[cfg(target_os = "linux")]
 mod linux;
-mod sandbox;
 
+use assert_matches::assert_matches;
 use codec::{Decode, Encode};
-use hex_literal::hex;
-use sc_executor_common::{runtime_blob::RuntimeBlob, wasm_runtime::WasmModule};
+use sc_executor_common::{
+	error::{Error, WasmError},
+	runtime_blob::RuntimeBlob,
+	wasm_runtime::WasmModule,
+};
 use sc_runtime_test::wasm_binary_unwrap;
 use sp_core::{
 	blake2_128, blake2_256, ed25519, map,
@@ -53,9 +56,38 @@ macro_rules! test_wasm_execution {
 			}
 
 			#[test]
-			#[cfg(feature = "wasmtime")]
-			fn [<$method_name _compiled>]() {
-				$method_name(WasmExecutionMethod::Compiled);
+			fn [<$method_name _compiled_recreate_instance_cow>]() {
+				$method_name(WasmExecutionMethod::Compiled {
+					instantiation_strategy: sc_executor_wasmtime::InstantiationStrategy::RecreateInstanceCopyOnWrite
+				});
+			}
+
+			#[test]
+			fn [<$method_name _compiled_recreate_instance_vanilla>]() {
+				$method_name(WasmExecutionMethod::Compiled {
+					instantiation_strategy: sc_executor_wasmtime::InstantiationStrategy::RecreateInstance
+				});
+			}
+
+			#[test]
+			fn [<$method_name _compiled_pooling_cow>]() {
+				$method_name(WasmExecutionMethod::Compiled {
+					instantiation_strategy: sc_executor_wasmtime::InstantiationStrategy::PoolingCopyOnWrite
+				});
+			}
+
+			#[test]
+			fn [<$method_name _compiled_pooling_vanilla>]() {
+				$method_name(WasmExecutionMethod::Compiled {
+					instantiation_strategy: sc_executor_wasmtime::InstantiationStrategy::Pooling
+				});
+			}
+
+			#[test]
+			fn [<$method_name _compiled_legacy_instance_reuse>]() {
+				$method_name(WasmExecutionMethod::Compiled {
+					instantiation_strategy: sc_executor_wasmtime::InstantiationStrategy::LegacyInstanceReuse
+				});
 			}
 		}
 	};
@@ -70,63 +102,16 @@ macro_rules! test_wasm_execution {
 	};
 }
 
-/// A macro to run a given test for each available WASM execution method *and* for each
-/// sandbox execution method.
-#[macro_export]
-macro_rules! test_wasm_execution_sandbox {
-	($method_name:ident) => {
-		paste::item! {
-			#[test]
-			fn [<$method_name _interpreted_host_executor>]() {
-				$method_name(WasmExecutionMethod::Interpreted, "_host");
-			}
-
-			#[test]
-			fn [<$method_name _interpreted_embedded_executor>]() {
-				$method_name(WasmExecutionMethod::Interpreted, "_embedded");
-			}
-
-			#[test]
-			#[cfg(feature = "wasmtime")]
-			fn [<$method_name _compiled_host_executor>]() {
-				$method_name(WasmExecutionMethod::Compiled, "_host");
-			}
-
-			#[test]
-			#[cfg(feature = "wasmtime")]
-			fn [<$method_name _compiled_embedded_executor>]() {
-				$method_name(WasmExecutionMethod::Compiled, "_embedded");
-			}
-		}
-	};
-
-	(interpreted_only $method_name:ident) => {
-		paste::item! {
-			#[test]
-			fn [<$method_name _interpreted_host_executor>]() {
-				$method_name(WasmExecutionMethod::Interpreted, "_host");
-			}
-		}
-
-		paste::item! {
-			#[test]
-			fn [<$method_name _interpreted_embedded_executor>]() {
-				$method_name(WasmExecutionMethod::Interpreted, "_embedded");
-			}
-		}
-	};
-}
-
 fn call_in_wasm<E: Externalities>(
 	function: &str,
 	call_data: &[u8],
 	execution_method: WasmExecutionMethod,
 	ext: &mut E,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
 	let executor =
 		crate::WasmExecutor::<HostFunctions>::new(execution_method, Some(1024), 8, None, 2);
 	executor.uncached_call(
-		RuntimeBlob::uncompress_if_needed(&wasm_binary_unwrap()[..]).unwrap(),
+		RuntimeBlob::uncompress_if_needed(wasm_binary_unwrap()).unwrap(),
 		ext,
 		true,
 		function,
@@ -148,25 +133,15 @@ fn call_not_existing_function(wasm_method: WasmExecutionMethod) {
 	let mut ext = TestExternalities::default();
 	let mut ext = ext.ext();
 
-	match call_in_wasm(
-		"test_calling_missing_external",
-		&[],
-		wasm_method,
-		&mut ext,
-	) {
-		Ok(_) => panic!("was expected an `Err`"),
-		Err(e) => {
-			match wasm_method {
-				WasmExecutionMethod::Interpreted => assert_eq!(
-					&format!("{:?}", e),
-					"\"Trap: Trap { kind: Host(Other(\\\"Function `missing_external` is only a stub. Calling a stub is not allowed.\\\")) }\""
-				),
-				#[cfg(feature = "wasmtime")]
-				WasmExecutionMethod::Compiled => assert!(
-					format!("{:?}", e).contains("Wasm execution trapped: call to a missing function env:missing_external")
-				),
-			}
-		}
+	match call_in_wasm("test_calling_missing_external", &[], wasm_method, &mut ext).unwrap_err() {
+		Error::AbortedDueToTrap(error) => {
+			let expected = match wasm_method {
+				WasmExecutionMethod::Interpreted => "Other: Function `missing_external` is only a stub. Calling a stub is not allowed.",
+				WasmExecutionMethod::Compiled { .. } => "call to a missing function env:missing_external"
+			};
+			assert_eq!(error.message, expected);
+		},
+		error => panic!("unexpected error: {:?}", error),
 	}
 }
 
@@ -175,25 +150,17 @@ fn call_yet_another_not_existing_function(wasm_method: WasmExecutionMethod) {
 	let mut ext = TestExternalities::default();
 	let mut ext = ext.ext();
 
-	match call_in_wasm(
-		"test_calling_yet_another_missing_external",
-		&[],
-		wasm_method,
-		&mut ext,
-	) {
-		Ok(_) => panic!("was expected an `Err`"),
-		Err(e) => {
-			match wasm_method {
-				WasmExecutionMethod::Interpreted => assert_eq!(
-					&format!("{:?}", e),
-					"\"Trap: Trap { kind: Host(Other(\\\"Function `yet_another_missing_external` is only a stub. Calling a stub is not allowed.\\\")) }\""
-				),
-				#[cfg(feature = "wasmtime")]
-				WasmExecutionMethod::Compiled => assert!(
-					format!("{:?}", e).contains("Wasm execution trapped: call to a missing function env:yet_another_missing_external")
-				),
-			}
-		}
+	match call_in_wasm("test_calling_yet_another_missing_external", &[], wasm_method, &mut ext)
+		.unwrap_err()
+	{
+		Error::AbortedDueToTrap(error) => {
+			let expected = match wasm_method {
+				WasmExecutionMethod::Interpreted => "Other: Function `yet_another_missing_external` is only a stub. Calling a stub is not allowed.",
+				WasmExecutionMethod::Compiled { .. } => "call to a missing function env:yet_another_missing_external"
+			};
+			assert_eq!(error.message, expected);
+		},
+		error => panic!("unexpected error: {:?}", error),
 	}
 }
 
@@ -305,16 +272,18 @@ fn sha2_256_should_work(wasm_method: WasmExecutionMethod) {
 	let mut ext = ext.ext();
 	assert_eq!(
 		call_in_wasm("test_sha2_256", &[0], wasm_method, &mut ext,).unwrap(),
-		hex!("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
-			.to_vec()
-			.encode(),
+		array_bytes::hex2bytes_unchecked(
+			"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+		)
+		.encode(),
 	);
 	assert_eq!(
 		call_in_wasm("test_sha2_256", &b"Hello world!".to_vec().encode(), wasm_method, &mut ext,)
 			.unwrap(),
-		hex!("c0535e4be2b79ffd93291305436bf889314e4a3faec05ecffcbb7df31ad9e51a")
-			.to_vec()
-			.encode(),
+		array_bytes::hex2bytes_unchecked(
+			"c0535e4be2b79ffd93291305436bf889314e4a3faec05ecffcbb7df31ad9e51a"
+		)
+		.encode(),
 	);
 }
 
@@ -324,16 +293,18 @@ fn twox_256_should_work(wasm_method: WasmExecutionMethod) {
 	let mut ext = ext.ext();
 	assert_eq!(
 		call_in_wasm("test_twox_256", &[0], wasm_method, &mut ext,).unwrap(),
-		hex!("99e9d85137db46ef4bbea33613baafd56f963c64b1f3685a4eb4abd67ff6203a")
-			.to_vec()
-			.encode(),
+		array_bytes::hex2bytes_unchecked(
+			"99e9d85137db46ef4bbea33613baafd56f963c64b1f3685a4eb4abd67ff6203a"
+		)
+		.encode(),
 	);
 	assert_eq!(
 		call_in_wasm("test_twox_256", &b"Hello world!".to_vec().encode(), wasm_method, &mut ext,)
 			.unwrap(),
-		hex!("b27dfd7f223f177f2a13647b533599af0c07f68bda23d96d059da2b451a35a74")
-			.to_vec()
-			.encode(),
+		array_bytes::hex2bytes_unchecked(
+			"b27dfd7f223f177f2a13647b533599af0c07f68bda23d96d059da2b451a35a74"
+		)
+		.encode(),
 	);
 }
 
@@ -343,12 +314,12 @@ fn twox_128_should_work(wasm_method: WasmExecutionMethod) {
 	let mut ext = ext.ext();
 	assert_eq!(
 		call_in_wasm("test_twox_128", &[0], wasm_method, &mut ext,).unwrap(),
-		hex!("99e9d85137db46ef4bbea33613baafd5").to_vec().encode(),
+		array_bytes::hex2bytes_unchecked("99e9d85137db46ef4bbea33613baafd5").encode(),
 	);
 	assert_eq!(
 		call_in_wasm("test_twox_128", &b"Hello world!".to_vec().encode(), wasm_method, &mut ext,)
 			.unwrap(),
-		hex!("b27dfd7f223f177f2a13647b533599af").to_vec().encode(),
+		array_bytes::hex2bytes_unchecked("b27dfd7f223f177f2a13647b533599af").encode(),
 	);
 }
 
@@ -479,19 +450,32 @@ fn should_trap_when_heap_exhausted(wasm_method: WasmExecutionMethod) {
 
 	let err = executor
 		.uncached_call(
-			RuntimeBlob::uncompress_if_needed(&wasm_binary_unwrap()[..]).unwrap(),
+			RuntimeBlob::uncompress_if_needed(wasm_binary_unwrap()).unwrap(),
 			&mut ext.ext(),
 			true,
-			"test_exhaust_heap",
-			&[0],
+			"test_allocate_vec",
+			&16777216_u32.encode(),
 		)
 		.unwrap_err();
 
-	assert!(err.contains("Allocator ran out of space"));
+	match err {
+		Error::AbortedDueToTrap(error)
+			if matches!(wasm_method, WasmExecutionMethod::Compiled { .. }) =>
+		{
+			assert_eq!(
+				error.message,
+				r#"host code panicked while being called by the runtime: Failed to allocate memory: "Allocator ran out of space""#
+			);
+		},
+		Error::RuntimePanicked(error) if wasm_method == WasmExecutionMethod::Interpreted => {
+			assert_eq!(error, r#"Failed to allocate memory: "Allocator ran out of space""#);
+		},
+		error => panic!("unexpected error: {:?}", error),
+	}
 }
 
 fn mk_test_runtime(wasm_method: WasmExecutionMethod, pages: u64) -> Arc<dyn WasmModule> {
-	let blob = RuntimeBlob::uncompress_if_needed(&wasm_binary_unwrap()[..])
+	let blob = RuntimeBlob::uncompress_if_needed(wasm_binary_unwrap())
 		.expect("failed to create a runtime blob out of test runtime");
 
 	crate::wasm_runtime::create_wasm_runtime_with_code::<HostFunctions>(
@@ -597,14 +581,14 @@ fn parallel_execution(wasm_method: WasmExecutionMethod) {
 				assert_eq!(
 					executor
 						.uncached_call(
-							RuntimeBlob::uncompress_if_needed(&wasm_binary_unwrap()[..]).unwrap(),
+							RuntimeBlob::uncompress_if_needed(wasm_binary_unwrap()).unwrap(),
 							&mut ext,
 							true,
 							"test_twox_128",
 							&[0],
 						)
 						.unwrap(),
-					hex!("99e9d85137db46ef4bbea33613baafd5").to_vec().encode(),
+					array_bytes::hex2bytes_unchecked("99e9d85137db46ef4bbea33613baafd5").encode()
 				);
 			})
 		})
@@ -665,33 +649,6 @@ fn wasm_tracing_should_work(wasm_method: WasmExecutionMethod) {
 	call_in_wasm("test_nested_spans", Default::default(), wasm_method, &mut ext).unwrap();
 	let len = traces.lock().unwrap().len();
 	assert_eq!(len, 2);
-}
-
-test_wasm_execution!(spawning_runtime_instance_should_work);
-fn spawning_runtime_instance_should_work(wasm_method: WasmExecutionMethod) {
-	let mut ext = TestExternalities::default();
-	let mut ext = ext.ext();
-
-	call_in_wasm("test_spawn", &[], wasm_method, &mut ext).unwrap();
-}
-
-test_wasm_execution!(spawning_runtime_instance_nested_should_work);
-fn spawning_runtime_instance_nested_should_work(wasm_method: WasmExecutionMethod) {
-	let mut ext = TestExternalities::default();
-	let mut ext = ext.ext();
-
-	call_in_wasm("test_nested_spawn", &[], wasm_method, &mut ext).unwrap();
-}
-
-test_wasm_execution!(panic_in_spawned_instance_panics_on_joining_its_result);
-fn panic_in_spawned_instance_panics_on_joining_its_result(wasm_method: WasmExecutionMethod) {
-	let mut ext = TestExternalities::default();
-	let mut ext = ext.ext();
-
-	let error_result =
-		call_in_wasm("test_panic_in_spawned", &[], wasm_method, &mut ext).unwrap_err();
-
-	assert!(format!("{}", error_result).contains("Spawned task"));
 }
 
 test_wasm_execution!(memory_is_cleared_between_invocations);
@@ -788,4 +745,108 @@ fn take_i8(wasm_method: WasmExecutionMethod) {
 	let mut ext = ext.ext();
 
 	call_in_wasm("test_take_i8", &(-66_i8).encode(), wasm_method, &mut ext).unwrap();
+}
+
+test_wasm_execution!(abort_on_panic);
+fn abort_on_panic(wasm_method: WasmExecutionMethod) {
+	let mut ext = TestExternalities::default();
+	let mut ext = ext.ext();
+
+	match call_in_wasm("test_abort_on_panic", &[], wasm_method, &mut ext).unwrap_err() {
+		Error::AbortedDueToPanic(error) => assert_eq!(error.message, "test_abort_on_panic called"),
+		error => panic!("unexpected error: {:?}", error),
+	}
+}
+
+test_wasm_execution!(unreachable_intrinsic);
+fn unreachable_intrinsic(wasm_method: WasmExecutionMethod) {
+	let mut ext = TestExternalities::default();
+	let mut ext = ext.ext();
+
+	match call_in_wasm("test_unreachable_intrinsic", &[], wasm_method, &mut ext).unwrap_err() {
+		Error::AbortedDueToTrap(error) => {
+			let expected = match wasm_method {
+				WasmExecutionMethod::Interpreted => "unreachable",
+				WasmExecutionMethod::Compiled { .. } =>
+					"wasm trap: wasm `unreachable` instruction executed",
+			};
+			assert_eq!(error.message, expected);
+		},
+		error => panic!("unexpected error: {:?}", error),
+	}
+}
+
+test_wasm_execution!(return_value);
+fn return_value(wasm_method: WasmExecutionMethod) {
+	let mut ext = TestExternalities::default();
+	let mut ext = ext.ext();
+
+	assert_eq!(
+		call_in_wasm("test_return_value", &[], wasm_method, &mut ext).unwrap(),
+		(1234u64).encode()
+	);
+}
+
+test_wasm_execution!(return_huge_len);
+fn return_huge_len(wasm_method: WasmExecutionMethod) {
+	let mut ext = TestExternalities::default();
+	let mut ext = ext.ext();
+
+	match call_in_wasm("test_return_huge_len", &[], wasm_method, &mut ext).unwrap_err() {
+		Error::Runtime => {
+			assert_matches!(wasm_method, WasmExecutionMethod::Interpreted);
+		},
+		Error::RuntimeConstruction(WasmError::Other(error)) => {
+			assert_matches!(wasm_method, WasmExecutionMethod::Compiled { .. });
+			assert_eq!(error, "output exceeds bounds of wasm memory");
+		},
+		error => panic!("unexpected error: {:?}", error),
+	}
+}
+
+test_wasm_execution!(return_max_memory_offset);
+fn return_max_memory_offset(wasm_method: WasmExecutionMethod) {
+	let mut ext = TestExternalities::default();
+	let mut ext = ext.ext();
+
+	assert_eq!(
+		call_in_wasm("test_return_max_memory_offset", &[], wasm_method, &mut ext).unwrap(),
+		(u8::MAX).encode()
+	);
+}
+
+test_wasm_execution!(return_max_memory_offset_plus_one);
+fn return_max_memory_offset_plus_one(wasm_method: WasmExecutionMethod) {
+	let mut ext = TestExternalities::default();
+	let mut ext = ext.ext();
+
+	match call_in_wasm("test_return_max_memory_offset_plus_one", &[], wasm_method, &mut ext)
+		.unwrap_err()
+	{
+		Error::Runtime => {
+			assert_matches!(wasm_method, WasmExecutionMethod::Interpreted);
+		},
+		Error::RuntimeConstruction(WasmError::Other(error)) => {
+			assert_matches!(wasm_method, WasmExecutionMethod::Compiled { .. });
+			assert_eq!(error, "output exceeds bounds of wasm memory");
+		},
+		error => panic!("unexpected error: {:?}", error),
+	}
+}
+
+test_wasm_execution!(return_overflow);
+fn return_overflow(wasm_method: WasmExecutionMethod) {
+	let mut ext = TestExternalities::default();
+	let mut ext = ext.ext();
+
+	match call_in_wasm("test_return_overflow", &[], wasm_method, &mut ext).unwrap_err() {
+		Error::Runtime => {
+			assert_matches!(wasm_method, WasmExecutionMethod::Interpreted);
+		},
+		Error::RuntimeConstruction(WasmError::Other(error)) => {
+			assert_matches!(wasm_method, WasmExecutionMethod::Compiled { .. });
+			assert_eq!(error, "output exceeds bounds of wasm memory");
+		},
+		error => panic!("unexpected error: {:?}", error),
+	}
 }

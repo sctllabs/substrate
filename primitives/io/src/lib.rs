@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -40,7 +40,7 @@ use sp_core::{
 	hexdisplay::HexDisplay,
 	offchain::{OffchainDbExt, OffchainWorkerExt, TransactionPoolExt},
 	storage::ChildInfo,
-	traits::{RuntimeSpawnExt, TaskExecutorExt},
+	traits::TaskExecutorExt,
 };
 #[cfg(feature = "std")]
 use sp_keystore::{KeystoreExt, SyncCryptoStore};
@@ -67,6 +67,12 @@ use sp_runtime_interface::{
 use codec::{Decode, Encode};
 
 #[cfg(feature = "std")]
+use secp256k1::{
+	ecdsa::{RecoverableSignature, RecoveryId},
+	Message, SECP256K1,
+};
+
+#[cfg(feature = "std")]
 use sp_externalities::{Externalities, ExternalitiesExt};
 
 #[cfg(feature = "std")]
@@ -74,6 +80,8 @@ mod batch_verifier;
 
 #[cfg(feature = "std")]
 use batch_verifier::BatchVerifier;
+
+pub use sp_externalities::MultiRemovalResults;
 
 #[cfg(feature = "std")]
 const LOG_TARGET: &str = "runtime::io";
@@ -93,18 +101,32 @@ pub enum EcdsaVerifyError {
 /// removed from the backend from making the `storage_kill` call.
 #[derive(PassByCodec, Encode, Decode)]
 pub enum KillStorageResult {
-	/// All key to remove were removed, return number of key removed from backend.
+	/// All keys to remove were removed, return number of iterations performed during the
+	/// operation.
 	AllRemoved(u32),
-	/// Not all key to remove were removed, return number of key removed from backend.
+	/// Not all key to remove were removed, return number of iterations performed during the
+	/// operation.
 	SomeRemaining(u32),
+}
+
+impl From<MultiRemovalResults> for KillStorageResult {
+	fn from(r: MultiRemovalResults) -> Self {
+		// We use `loops` here rather than `backend` because that's the same as the original
+		// functionality pre-#11490. This won't matter once we switch to the new host function
+		// since we won't be using the `KillStorageResult` type in the runtime any more.
+		match r.maybe_cursor {
+			None => Self::AllRemoved(r.loops),
+			Some(..) => Self::SomeRemaining(r.loops),
+		}
+	}
 }
 
 /// Interface for accessing the storage from within the runtime.
 #[runtime_interface]
 pub trait Storage {
 	/// Returns the data for `key` in the storage or `None` if the key can not be found.
-	fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-		self.storage(key).map(|s| s.to_vec())
+	fn get(&self, key: &[u8]) -> Option<bytes::Bytes> {
+		self.storage(key).map(|s| bytes::Bytes::from(s.to_vec()))
 	}
 
 	/// Get `key` from storage, placing the value into `value_out` and return the number of
@@ -139,7 +161,7 @@ pub trait Storage {
 
 	/// Clear the storage of each key-value pair where the key starts with the given `prefix`.
 	fn clear_prefix(&mut self, prefix: &[u8]) {
-		let _ = Externalities::clear_prefix(*self, prefix, None);
+		let _ = Externalities::clear_prefix(*self, prefix, None, None);
 	}
 
 	/// Clear the storage of each key-value pair where the key starts with the given `prefix`.
@@ -152,9 +174,7 @@ pub trait Storage {
 	/// The limit can be used to partially delete a prefix storage in case it is too large
 	/// to delete in one go (block).
 	///
-	/// It returns a boolean false iff some keys are remaining in
-	/// the prefix after the functions returns. Also returns a `u32` with
-	/// the number of keys removed from the process.
+	/// Returns [`KillStorageResult`] to inform about the result.
 	///
 	/// # Note
 	///
@@ -165,15 +185,60 @@ pub trait Storage {
 	///
 	/// Calling this function multiple times per block for the same `prefix` does
 	/// not make much sense because it is not cumulative when called inside the same block.
-	/// Use this function to distribute the deletion of a single child trie across multiple
-	/// blocks.
+	/// The deletion would always start from `prefix` resulting in the same keys being deleted
+	/// every time this function is called with the exact same arguments per block. This happens
+	/// because the keys in the overlay are not taken into account when deleting keys in the
+	/// backend.
 	#[version(2)]
 	fn clear_prefix(&mut self, prefix: &[u8], limit: Option<u32>) -> KillStorageResult {
-		let (all_removed, num_removed) = Externalities::clear_prefix(*self, prefix, limit);
-		match all_removed {
-			true => KillStorageResult::AllRemoved(num_removed),
-			false => KillStorageResult::SomeRemaining(num_removed),
-		}
+		Externalities::clear_prefix(*self, prefix, limit, None).into()
+	}
+
+	/// Partially clear the storage of each key-value pair where the key starts with the given
+	/// prefix.
+	///
+	/// # Limit
+	///
+	/// A *limit* should always be provided through `maybe_limit`. This is one fewer than the
+	/// maximum number of backend iterations which may be done by this operation and as such
+	/// represents the maximum number of backend deletions which may happen. A *limit* of zero
+	/// implies that no keys will be deleted, though there may be a single iteration done.
+	///
+	/// The limit can be used to partially delete a prefix storage in case it is too large or costly
+	/// to delete in a single operation.
+	///
+	/// # Cursor
+	///
+	/// A *cursor* may be passed in to this operation with `maybe_cursor`. `None` should only be
+	/// passed once (in the initial call) for any given `maybe_prefix` value. Subsequent calls
+	/// operating on the same prefix should always pass `Some`, and this should be equal to the
+	/// previous call result's `maybe_cursor` field.
+	///
+	/// Returns [`MultiRemovalResults`](sp_io::MultiRemovalResults) to inform about the result. Once
+	/// the resultant `maybe_cursor` field is `None`, then no further items remain to be deleted.
+	///
+	/// NOTE: After the initial call for any given prefix, it is important that no keys further
+	/// keys under the same prefix are inserted. If so, then they may or may not be deleted by
+	/// subsequent calls.
+	///
+	/// # Note
+	///
+	/// Please note that keys which are residing in the overlay for that prefix when
+	/// issuing this call are deleted without counting towards the `limit`.
+	#[version(3, register_only)]
+	fn clear_prefix(
+		&mut self,
+		maybe_prefix: &[u8],
+		maybe_limit: Option<u32>,
+		maybe_cursor: Option<Vec<u8>>, //< TODO Make work or just Option<Vec<u8>>?
+	) -> MultiRemovalResults {
+		Externalities::clear_prefix(
+			*self,
+			maybe_prefix,
+			maybe_limit,
+			maybe_cursor.as_ref().map(|x| &x[..]),
+		)
+		.into()
 	}
 
 	/// Append the encoded `value` to the storage item at `key`.
@@ -214,7 +279,7 @@ pub trait Storage {
 
 	/// Get the next key in storage after the given one in lexicographic order.
 	fn next_key(&mut self, key: &[u8]) -> Option<Vec<u8>> {
-		self.next_storage_key(&key)
+		self.next_storage_key(key)
 	}
 
 	/// Start a new nested transaction.
@@ -317,7 +382,7 @@ pub trait DefaultChildStorage {
 	/// is removed.
 	fn storage_kill(&mut self, storage_key: &[u8]) {
 		let child_info = ChildInfo::new_default(storage_key);
-		self.kill_child_storage(&child_info, None);
+		let _ = self.kill_child_storage(&child_info, None, None);
 	}
 
 	/// Clear a child storage key.
@@ -326,8 +391,8 @@ pub trait DefaultChildStorage {
 	#[version(2)]
 	fn storage_kill(&mut self, storage_key: &[u8], limit: Option<u32>) -> bool {
 		let child_info = ChildInfo::new_default(storage_key);
-		let (all_removed, _num_removed) = self.kill_child_storage(&child_info, limit);
-		all_removed
+		let r = self.kill_child_storage(&child_info, limit, None);
+		r.maybe_cursor.is_none()
 	}
 
 	/// Clear a child storage key.
@@ -336,11 +401,22 @@ pub trait DefaultChildStorage {
 	#[version(3)]
 	fn storage_kill(&mut self, storage_key: &[u8], limit: Option<u32>) -> KillStorageResult {
 		let child_info = ChildInfo::new_default(storage_key);
-		let (all_removed, num_removed) = self.kill_child_storage(&child_info, limit);
-		match all_removed {
-			true => KillStorageResult::AllRemoved(num_removed),
-			false => KillStorageResult::SomeRemaining(num_removed),
-		}
+		self.kill_child_storage(&child_info, limit, None).into()
+	}
+
+	/// Clear a child storage key.
+	///
+	/// See `Storage` module `clear_prefix` documentation for `limit` usage.
+	#[version(4, register_only)]
+	fn storage_kill(
+		&mut self,
+		storage_key: &[u8],
+		maybe_limit: Option<u32>,
+		maybe_cursor: Option<Vec<u8>>,
+	) -> MultiRemovalResults {
+		let child_info = ChildInfo::new_default(storage_key);
+		self.kill_child_storage(&child_info, maybe_limit, maybe_cursor.as_ref().map(|x| &x[..]))
+			.into()
 	}
 
 	/// Check a child storage key.
@@ -356,7 +432,7 @@ pub trait DefaultChildStorage {
 	/// Clear the child storage of each key-value pair where the key starts with the given `prefix`.
 	fn clear_prefix(&mut self, storage_key: &[u8], prefix: &[u8]) {
 		let child_info = ChildInfo::new_default(storage_key);
-		let _ = self.clear_child_prefix(&child_info, prefix, None);
+		let _ = self.clear_child_prefix(&child_info, prefix, None, None);
 	}
 
 	/// Clear the child storage of each key-value pair where the key starts with the given `prefix`.
@@ -370,11 +446,28 @@ pub trait DefaultChildStorage {
 		limit: Option<u32>,
 	) -> KillStorageResult {
 		let child_info = ChildInfo::new_default(storage_key);
-		let (all_removed, num_removed) = self.clear_child_prefix(&child_info, prefix, limit);
-		match all_removed {
-			true => KillStorageResult::AllRemoved(num_removed),
-			false => KillStorageResult::SomeRemaining(num_removed),
-		}
+		self.clear_child_prefix(&child_info, prefix, limit, None).into()
+	}
+
+	/// Clear the child storage of each key-value pair where the key starts with the given `prefix`.
+	///
+	/// See `Storage` module `clear_prefix` documentation for `limit` usage.
+	#[version(3, register_only)]
+	fn clear_prefix(
+		&mut self,
+		storage_key: &[u8],
+		prefix: &[u8],
+		maybe_limit: Option<u32>,
+		maybe_cursor: Option<Vec<u8>>,
+	) -> MultiRemovalResults {
+		let child_info = ChildInfo::new_default(storage_key);
+		self.clear_child_prefix(
+			&child_info,
+			prefix,
+			maybe_limit,
+			maybe_cursor.as_ref().map(|x| &x[..]),
+		)
+		.into()
 	}
 
 	/// Default child root calculation.
@@ -605,6 +698,34 @@ pub trait Misc {
 	}
 }
 
+#[cfg(feature = "std")]
+sp_externalities::decl_extension! {
+	/// Extension to signal to [`crypt::ed25519_verify`] to use the dalek crate.
+	///
+	/// The switch from `ed25519-dalek` to `ed25519-zebra` was a breaking change.
+	/// `ed25519-zebra` is more permissive when it comes to the verification of signatures.
+	/// This means that some chains may fail to sync from genesis when using `ed25519-zebra`.
+	/// So, this extension can be registered to the runtime execution environment to signal
+	/// that `ed25519-dalek` should be used for verification. The extension can be registered
+	/// in the following way:
+	///
+	/// ```nocompile
+	/// client.execution_extensions().set_extensions_factory(
+	/// 	// Let the `UseDalekExt` extension being registered for each runtime invocation
+	/// 	// until the execution happens in the context of block `1000`.
+	/// 	sc_client_api::execution_extensions::ExtensionBeforeBlock::<Block, UseDalekExt>::new(1000)
+	/// );
+	/// ```
+	pub struct UseDalekExt;
+}
+
+#[cfg(feature = "std")]
+impl Default for UseDalekExt {
+	fn default() -> Self {
+		Self
+	}
+}
+
 /// Interfaces for working with crypto related types from within the runtime.
 #[runtime_interface]
 pub trait Crypto {
@@ -623,7 +744,7 @@ pub trait Crypto {
 	///
 	/// Returns the public key.
 	fn ed25519_generate(&mut self, id: KeyTypeId, seed: Option<Vec<u8>>) -> ed25519::Public {
-		let seed = seed.as_ref().map(|s| std::str::from_utf8(&s).expect("Seed is valid utf8!"));
+		let seed = seed.as_ref().map(|s| std::str::from_utf8(s).expect("Seed is valid utf8!"));
 		let keystore = &***self
 			.extension::<KeystoreExt>()
 			.expect("No `keystore` associated for the current context!");
@@ -647,20 +768,39 @@ pub trait Crypto {
 		SyncCryptoStore::sign_with(keystore, id, &pub_key.into(), msg)
 			.ok()
 			.flatten()
-			.map(|sig| ed25519::Signature::from_slice(sig.as_slice()))
+			.and_then(|sig| ed25519::Signature::from_slice(&sig))
 	}
 
 	/// Verify `ed25519` signature.
 	///
 	/// Returns `true` when the verification was successful.
 	fn ed25519_verify(sig: &ed25519::Signature, msg: &[u8], pub_key: &ed25519::Public) -> bool {
-		ed25519::Pair::verify(sig, msg, pub_key)
+		// We don't want to force everyone needing to call the function in an externalities context.
+		// So, we assume that we should not use dalek when we are not in externalities context.
+		// Otherwise, we check if the extension is present.
+		if sp_externalities::with_externalities(|mut e| e.extension::<UseDalekExt>().is_some())
+			.unwrap_or_default()
+		{
+			use ed25519_dalek::Verifier;
+
+			let Ok(public_key) = ed25519_dalek::PublicKey::from_bytes(&pub_key.0) else {
+				return false
+			};
+
+			let Ok(sig) = ed25519_dalek::Signature::from_bytes(&sig.0) else {
+				return false
+			};
+
+			public_key.verify(msg, &sig).is_ok()
+		} else {
+			ed25519::Pair::verify(sig, msg, pub_key)
+		}
 	}
 
 	/// Register a `ed25519` signature for batch verification.
 	///
 	/// Batch verification must be enabled by calling [`start_batch_verify`].
-	/// If batch verification is not enabled, the signature will be verified immediatley.
+	/// If batch verification is not enabled, the signature will be verified immediately.
 	/// To get the result of the batch verification, [`finish_batch_verify`]
 	/// needs to be called.
 	///
@@ -672,7 +812,7 @@ pub trait Crypto {
 		pub_key: &ed25519::Public,
 	) -> bool {
 		self.extension::<VerificationExt>()
-			.map(|extension| extension.push_ed25519(sig.clone(), pub_key.clone(), msg.to_vec()))
+			.map(|extension| extension.push_ed25519(sig.clone(), *pub_key, msg.to_vec()))
 			.unwrap_or_else(|| ed25519_verify(sig, msg, pub_key))
 	}
 
@@ -687,7 +827,7 @@ pub trait Crypto {
 	/// Register a `sr25519` signature for batch verification.
 	///
 	/// Batch verification must be enabled by calling [`start_batch_verify`].
-	/// If batch verification is not enabled, the signature will be verified immediatley.
+	/// If batch verification is not enabled, the signature will be verified immediately.
 	/// To get the result of the batch verification, [`finish_batch_verify`]
 	/// needs to be called.
 	///
@@ -699,7 +839,7 @@ pub trait Crypto {
 		pub_key: &sr25519::Public,
 	) -> bool {
 		self.extension::<VerificationExt>()
-			.map(|extension| extension.push_sr25519(sig.clone(), pub_key.clone(), msg.to_vec()))
+			.map(|extension| extension.push_sr25519(sig.clone(), *pub_key, msg.to_vec()))
 			.unwrap_or_else(|| sr25519_verify(sig, msg, pub_key))
 	}
 
@@ -747,7 +887,7 @@ pub trait Crypto {
 	///
 	/// Returns the public key.
 	fn sr25519_generate(&mut self, id: KeyTypeId, seed: Option<Vec<u8>>) -> sr25519::Public {
-		let seed = seed.as_ref().map(|s| std::str::from_utf8(&s).expect("Seed is valid utf8!"));
+		let seed = seed.as_ref().map(|s| std::str::from_utf8(s).expect("Seed is valid utf8!"));
 		let keystore = &***self
 			.extension::<KeystoreExt>()
 			.expect("No `keystore` associated for the current context!");
@@ -771,7 +911,7 @@ pub trait Crypto {
 		SyncCryptoStore::sign_with(keystore, id, &pub_key.into(), msg)
 			.ok()
 			.flatten()
-			.map(|sig| sr25519::Signature::from_slice(sig.as_slice()))
+			.and_then(|sig| sr25519::Signature::from_slice(&sig))
 	}
 
 	/// Verify an `sr25519` signature.
@@ -797,7 +937,7 @@ pub trait Crypto {
 	///
 	/// Returns the public key.
 	fn ecdsa_generate(&mut self, id: KeyTypeId, seed: Option<Vec<u8>>) -> ecdsa::Public {
-		let seed = seed.as_ref().map(|s| std::str::from_utf8(&s).expect("Seed is valid utf8!"));
+		let seed = seed.as_ref().map(|s| std::str::from_utf8(s).expect("Seed is valid utf8!"));
 		let keystore = &***self
 			.extension::<KeystoreExt>()
 			.expect("No `keystore` associated for the current context!");
@@ -820,7 +960,7 @@ pub trait Crypto {
 		SyncCryptoStore::sign_with(keystore, id, &pub_key.into(), msg)
 			.ok()
 			.flatten()
-			.map(|sig| ecdsa::Signature::from_slice(sig.as_slice()))
+			.and_then(|sig| ecdsa::Signature::from_slice(&sig))
 	}
 
 	/// Sign the given a pre-hashed `msg` with the `ecdsa` key that corresponds to the given public
@@ -842,7 +982,9 @@ pub trait Crypto {
 	/// Verify `ecdsa` signature.
 	///
 	/// Returns `true` when the verification was successful.
+	/// This version is able to handle, non-standard, overflowing signatures.
 	fn ecdsa_verify(sig: &ecdsa::Signature, msg: &[u8], pub_key: &ecdsa::Public) -> bool {
+		#[allow(deprecated)]
 		ecdsa::Pair::verify_deprecated(sig, msg, pub_key)
 	}
 
@@ -880,7 +1022,7 @@ pub trait Crypto {
 		pub_key: &ecdsa::Public,
 	) -> bool {
 		self.extension::<VerificationExt>()
-			.map(|extension| extension.push_ecdsa(sig.clone(), pub_key.clone(), msg.to_vec()))
+			.map(|extension| extension.push_ecdsa(sig.clone(), *pub_key, msg.to_vec()))
 			.unwrap_or_else(|| ecdsa_verify(sig, msg, pub_key))
 	}
 
@@ -891,18 +1033,20 @@ pub trait Crypto {
 	///
 	/// Returns `Err` if the signature is bad, otherwise the 64-byte pubkey
 	/// (doesn't include the 0x04 prefix).
+	/// This version is able to handle, non-standard, overflowing signatures.
 	fn secp256k1_ecdsa_recover(
 		sig: &[u8; 65],
 		msg: &[u8; 32],
 	) -> Result<[u8; 64], EcdsaVerifyError> {
-		let rs = libsecp256k1::Signature::parse_overflowing_slice(&sig[0..64])
-			.map_err(|_| EcdsaVerifyError::BadRS)?;
-		let v = libsecp256k1::RecoveryId::parse(
-			if sig[64] > 26 { sig[64] - 27 } else { sig[64] } as u8
+		let rid = libsecp256k1::RecoveryId::parse(
+			if sig[64] > 26 { sig[64] - 27 } else { sig[64] } as u8,
 		)
 		.map_err(|_| EcdsaVerifyError::BadV)?;
-		let pubkey = libsecp256k1::recover(&libsecp256k1::Message::parse(msg), &rs, &v)
-			.map_err(|_| EcdsaVerifyError::BadSignature)?;
+		let sig = libsecp256k1::Signature::parse_overflowing_slice(&sig[..64])
+			.map_err(|_| EcdsaVerifyError::BadRS)?;
+		let msg = libsecp256k1::Message::parse(msg);
+		let pubkey =
+			libsecp256k1::recover(&msg, &sig, &rid).map_err(|_| EcdsaVerifyError::BadSignature)?;
 		let mut res = [0u8; 64];
 		res.copy_from_slice(&pubkey.serialize()[1..65]);
 		Ok(res)
@@ -920,16 +1064,16 @@ pub trait Crypto {
 		sig: &[u8; 65],
 		msg: &[u8; 32],
 	) -> Result<[u8; 64], EcdsaVerifyError> {
-		let rs = libsecp256k1::Signature::parse_standard_slice(&sig[0..64])
+		let rid = RecoveryId::from_i32(if sig[64] > 26 { sig[64] - 27 } else { sig[64] } as i32)
+			.map_err(|_| EcdsaVerifyError::BadV)?;
+		let sig = RecoverableSignature::from_compact(&sig[..64], rid)
 			.map_err(|_| EcdsaVerifyError::BadRS)?;
-		let v = libsecp256k1::RecoveryId::parse(
-			if sig[64] > 26 { sig[64] - 27 } else { sig[64] } as u8
-		)
-		.map_err(|_| EcdsaVerifyError::BadV)?;
-		let pubkey = libsecp256k1::recover(&libsecp256k1::Message::parse(msg), &rs, &v)
+		let msg = Message::from_slice(msg).expect("Message is 32 bytes; qed");
+		let pubkey = SECP256K1
+			.recover_ecdsa(&msg, &sig)
 			.map_err(|_| EcdsaVerifyError::BadSignature)?;
 		let mut res = [0u8; 64];
-		res.copy_from_slice(&pubkey.serialize()[1..65]);
+		res.copy_from_slice(&pubkey.serialize_uncompressed()[1..]);
 		Ok(res)
 	}
 
@@ -943,14 +1087,15 @@ pub trait Crypto {
 		sig: &[u8; 65],
 		msg: &[u8; 32],
 	) -> Result<[u8; 33], EcdsaVerifyError> {
-		let rs = libsecp256k1::Signature::parse_overflowing_slice(&sig[0..64])
-			.map_err(|_| EcdsaVerifyError::BadRS)?;
-		let v = libsecp256k1::RecoveryId::parse(
-			if sig[64] > 26 { sig[64] - 27 } else { sig[64] } as u8
+		let rid = libsecp256k1::RecoveryId::parse(
+			if sig[64] > 26 { sig[64] - 27 } else { sig[64] } as u8,
 		)
 		.map_err(|_| EcdsaVerifyError::BadV)?;
-		let pubkey = libsecp256k1::recover(&libsecp256k1::Message::parse(msg), &rs, &v)
-			.map_err(|_| EcdsaVerifyError::BadSignature)?;
+		let sig = libsecp256k1::Signature::parse_overflowing_slice(&sig[0..64])
+			.map_err(|_| EcdsaVerifyError::BadRS)?;
+		let msg = libsecp256k1::Message::parse(msg);
+		let pubkey =
+			libsecp256k1::recover(&msg, &sig, &rid).map_err(|_| EcdsaVerifyError::BadSignature)?;
 		Ok(pubkey.serialize_compressed())
 	}
 
@@ -965,15 +1110,15 @@ pub trait Crypto {
 		sig: &[u8; 65],
 		msg: &[u8; 32],
 	) -> Result<[u8; 33], EcdsaVerifyError> {
-		let rs = libsecp256k1::Signature::parse_standard_slice(&sig[0..64])
+		let rid = RecoveryId::from_i32(if sig[64] > 26 { sig[64] - 27 } else { sig[64] } as i32)
+			.map_err(|_| EcdsaVerifyError::BadV)?;
+		let sig = RecoverableSignature::from_compact(&sig[..64], rid)
 			.map_err(|_| EcdsaVerifyError::BadRS)?;
-		let v = libsecp256k1::RecoveryId::parse(
-			if sig[64] > 26 { sig[64] - 27 } else { sig[64] } as u8
-		)
-		.map_err(|_| EcdsaVerifyError::BadV)?;
-		let pubkey = libsecp256k1::recover(&libsecp256k1::Message::parse(msg), &rs, &v)
+		let msg = Message::from_slice(msg).expect("Message is 32 bytes; qed");
+		let pubkey = SECP256K1
+			.recover_ecdsa(&msg, &sig)
 			.map_err(|_| EcdsaVerifyError::BadSignature)?;
-		Ok(pubkey.serialize_compressed())
+		Ok(pubkey.serialize())
 	}
 }
 
@@ -1290,6 +1435,17 @@ pub trait Allocator {
 	}
 }
 
+/// WASM-only interface which allows for aborting the execution in case
+/// of an unrecoverable error.
+#[runtime_interface(wasm_only)]
+pub trait PanicHandler {
+	/// Aborts the current execution with the given error message.
+	#[trap_on_return]
+	fn abort_on_panic(&mut self, message: &str) {
+		self.register_panic_error_message(message);
+	}
+}
+
 /// Interface that provides functions for logging from within the runtime.
 #[runtime_interface]
 pub trait Logging {
@@ -1413,17 +1569,17 @@ mod tracing_setup {
 		fn new_span(&self, attrs: &Attributes<'_>) -> Id {
 			Id::from_u64(wasm_tracing::enter_span(Crossing(attrs.into())))
 		}
-		fn enter(&self, span: &Id) {
+		fn enter(&self, _: &Id) {
 			// Do nothing, we already entered the span previously
 		}
 		/// Not implemented! We do not support recording values later
 		/// Will panic when used.
-		fn record(&self, span: &Id, values: &Record<'_>) {
+		fn record(&self, _: &Id, _: &Record<'_>) {
 			unimplemented! {} // this usage is not supported
 		}
 		/// Not implemented! We do not support recording values later
 		/// Will panic when used.
-		fn record_follows_from(&self, span: &Id, follows: &Id) {
+		fn record_follows_from(&self, _: &Id, _: &Id) {
 			unimplemented! {} // this usage is not supported
 		}
 		fn event(&self, event: &Event<'_>) {
@@ -1455,147 +1611,15 @@ mod tracing_setup {
 
 pub use tracing_setup::init_tracing;
 
-/// Wasm-only interface that provides functions for interacting with the sandbox.
-#[runtime_interface(wasm_only)]
-pub trait Sandbox {
-	/// Instantiate a new sandbox instance with the given `wasm_code`.
-	fn instantiate(
-		&mut self,
-		dispatch_thunk: u32,
-		wasm_code: &[u8],
-		env_def: &[u8],
-		state_ptr: Pointer<u8>,
-	) -> u32 {
-		self.sandbox()
-			.instance_new(dispatch_thunk, wasm_code, env_def, state_ptr.into())
-			.expect("Failed to instantiate a new sandbox")
-	}
-
-	/// Invoke `function` in the sandbox with `sandbox_idx`.
-	fn invoke(
-		&mut self,
-		instance_idx: u32,
-		function: &str,
-		args: &[u8],
-		return_val_ptr: Pointer<u8>,
-		return_val_len: u32,
-		state_ptr: Pointer<u8>,
-	) -> u32 {
-		self.sandbox()
-			.invoke(
-				instance_idx,
-				&function,
-				&args,
-				return_val_ptr,
-				return_val_len,
-				state_ptr.into(),
-			)
-			.expect("Failed to invoke function with sandbox")
-	}
-
-	/// Create a new memory instance with the given `initial` and `maximum` size.
-	fn memory_new(&mut self, initial: u32, maximum: u32) -> u32 {
-		self.sandbox()
-			.memory_new(initial, maximum)
-			.expect("Failed to create new memory with sandbox")
-	}
-
-	/// Get the memory starting at `offset` from the instance with `memory_idx` into the buffer.
-	fn memory_get(
-		&mut self,
-		memory_idx: u32,
-		offset: u32,
-		buf_ptr: Pointer<u8>,
-		buf_len: u32,
-	) -> u32 {
-		self.sandbox()
-			.memory_get(memory_idx, offset, buf_ptr, buf_len)
-			.expect("Failed to get memory with sandbox")
-	}
-
-	/// Set the memory in the given `memory_idx` to the given value at `offset`.
-	fn memory_set(
-		&mut self,
-		memory_idx: u32,
-		offset: u32,
-		val_ptr: Pointer<u8>,
-		val_len: u32,
-	) -> u32 {
-		self.sandbox()
-			.memory_set(memory_idx, offset, val_ptr, val_len)
-			.expect("Failed to set memory with sandbox")
-	}
-
-	/// Teardown the memory instance with the given `memory_idx`.
-	fn memory_teardown(&mut self, memory_idx: u32) {
-		self.sandbox()
-			.memory_teardown(memory_idx)
-			.expect("Failed to teardown memory with sandbox")
-	}
-
-	/// Teardown the sandbox instance with the given `instance_idx`.
-	fn instance_teardown(&mut self, instance_idx: u32) {
-		self.sandbox()
-			.instance_teardown(instance_idx)
-			.expect("Failed to teardown sandbox instance")
-	}
-
-	/// Get the value from a global with the given `name`. The sandbox is determined by the given
-	/// `instance_idx`.
-	///
-	/// Returns `Some(_)` when the requested global variable could be found.
-	fn get_global_val(
-		&mut self,
-		instance_idx: u32,
-		name: &str,
-	) -> Option<sp_wasm_interface::Value> {
-		self.sandbox()
-			.get_global_val(instance_idx, name)
-			.expect("Failed to get global from sandbox")
-	}
-}
-
-/// Wasm host functions for managing tasks.
-///
-/// This should not be used directly. Use `sp_tasks` for running parallel tasks instead.
-#[runtime_interface(wasm_only)]
-pub trait RuntimeTasks {
-	/// Wasm host function for spawning task.
-	///
-	/// This should not be used directly. Use `sp_tasks::spawn` instead.
-	fn spawn(dispatcher_ref: u32, entry: u32, payload: Vec<u8>) -> u64 {
-		sp_externalities::with_externalities(|mut ext| {
-			let runtime_spawn = ext
-				.extension::<RuntimeSpawnExt>()
-				.expect("Cannot spawn without dynamic runtime dispatcher (RuntimeSpawnExt)");
-			runtime_spawn.spawn_call(dispatcher_ref, entry, payload)
-		})
-		.expect("`RuntimeTasks::spawn`: called outside of externalities context")
-	}
-
-	/// Wasm host function for joining a task.
-	///
-	/// This should not be used directly. Use `join` of `sp_tasks::spawn` result instead.
-	fn join(handle: u64) -> Vec<u8> {
-		sp_externalities::with_externalities(|mut ext| {
-			let runtime_spawn = ext
-				.extension::<RuntimeSpawnExt>()
-				.expect("Cannot join without dynamic runtime dispatcher (RuntimeSpawnExt)");
-			runtime_spawn.join(handle)
-		})
-		.expect("`RuntimeTasks::join`: called outside of externalities context")
-	}
-}
-
 /// Allocator used by Substrate when executing the Wasm runtime.
-#[cfg(not(feature = "std"))]
+#[cfg(all(target_arch = "wasm32", not(feature = "std")))]
 struct WasmAllocator;
 
-#[cfg(all(not(feature = "disable_allocator"), not(feature = "std")))]
+#[cfg(all(target_arch = "wasm32", not(feature = "disable_allocator"), not(feature = "std")))]
 #[global_allocator]
 static ALLOCATOR: WasmAllocator = WasmAllocator;
 
-#[cfg(not(feature = "std"))]
+#[cfg(all(target_arch = "wasm32", not(feature = "std")))]
 mod allocator_impl {
 	use super::*;
 	use core::alloc::{GlobalAlloc, Layout};
@@ -1617,16 +1641,30 @@ mod allocator_impl {
 #[no_mangle]
 pub fn panic(info: &core::panic::PanicInfo) -> ! {
 	let message = sp_std::alloc::format!("{}", info);
-	logging::log(LogLevel::Error, "runtime", message.as_bytes());
-	core::arch::wasm32::unreachable();
+	#[cfg(feature = "improved_panic_error_reporting")]
+	{
+		panic_handler::abort_on_panic(&message);
+	}
+	#[cfg(not(feature = "improved_panic_error_reporting"))]
+	{
+		logging::log(LogLevel::Error, "runtime", message.as_bytes());
+		core::arch::wasm32::unreachable();
+	}
 }
 
 /// A default OOM handler for WASM environment.
 #[cfg(all(not(feature = "disable_oom"), not(feature = "std")))]
 #[alloc_error_handler]
 pub fn oom(_: core::alloc::Layout) -> ! {
-	logging::log(LogLevel::Error, "runtime", b"Runtime memory exhausted. Aborting");
-	core::arch::wasm32::unreachable();
+	#[cfg(feature = "improved_panic_error_reporting")]
+	{
+		panic_handler::abort_on_panic("Runtime memory exhausted.");
+	}
+	#[cfg(not(feature = "improved_panic_error_reporting"))]
+	{
+		logging::log(LogLevel::Error, "runtime", b"Runtime memory exhausted. Aborting");
+		core::arch::wasm32::unreachable();
+	}
 }
 
 /// Type alias for Externalities implementation used in tests.
@@ -1646,11 +1684,10 @@ pub type SubstrateHostFunctions = (
 	crypto::HostFunctions,
 	hashing::HostFunctions,
 	allocator::HostFunctions,
+	panic_handler::HostFunctions,
 	logging::HostFunctions,
-	sandbox::HostFunctions,
 	crate::trie::HostFunctions,
 	offchain_index::HostFunctions,
-	runtime_tasks::HostFunctions,
 	transaction_index::HostFunctions,
 );
 
@@ -1670,7 +1707,7 @@ mod tests {
 		t.execute_with(|| {
 			assert_eq!(storage::get(b"hello"), None);
 			storage::set(b"hello", b"world");
-			assert_eq!(storage::get(b"hello"), Some(b"world".to_vec()));
+			assert_eq!(storage::get(b"hello"), Some(b"world".to_vec().into()));
 			assert_eq!(storage::get(b"foo"), None);
 			storage::set(b"foo", &[1, 2, 3][..]);
 		});
@@ -1682,7 +1719,7 @@ mod tests {
 
 		t.execute_with(|| {
 			assert_eq!(storage::get(b"hello"), None);
-			assert_eq!(storage::get(b"foo"), Some(b"bar".to_vec()));
+			assert_eq!(storage::get(b"foo"), Some(b"bar".to_vec().into()));
 		});
 
 		let value = vec![7u8; 35];
@@ -1692,7 +1729,7 @@ mod tests {
 
 		t.execute_with(|| {
 			assert_eq!(storage::get(b"hello"), None);
-			assert_eq!(storage::get(b"foo00"), Some(value.clone()));
+			assert_eq!(storage::get(b"foo00"), Some(value.clone().into()));
 		});
 	}
 
@@ -1727,15 +1764,30 @@ mod tests {
 		});
 
 		t.execute_with(|| {
+			// We can switch to this once we enable v3 of the `clear_prefix`.
+			//assert!(matches!(
+			//	storage::clear_prefix(b":abc", None),
+			//	MultiRemovalResults::NoneLeft { db: 2, total: 2 }
+			//));
 			assert!(matches!(
 				storage::clear_prefix(b":abc", None),
-				KillStorageResult::AllRemoved(2)
+				KillStorageResult::AllRemoved(2),
 			));
 
 			assert!(storage::get(b":a").is_some());
 			assert!(storage::get(b":abdd").is_some());
 			assert!(storage::get(b":abcd").is_none());
 			assert!(storage::get(b":abc").is_none());
+
+			// We can switch to this once we enable v3 of the `clear_prefix`.
+			//assert!(matches!(
+			//	storage::clear_prefix(b":abc", None),
+			//	MultiRemovalResults::NoneLeft { db: 0, total: 0 }
+			//));
+			assert!(matches!(
+				storage::clear_prefix(b":abc", None),
+				KillStorageResult::AllRemoved(0),
+			));
 		});
 	}
 
@@ -1763,6 +1815,7 @@ mod tests {
 		ext.register_extension(TaskExecutorExt::new(TaskExecutor::new()));
 		ext.execute_with(|| {
 			let pair = sr25519::Pair::generate_with_phrase(None).0;
+			let pair_unused = sr25519::Pair::generate_with_phrase(None).0;
 			crypto::start_batch_verify();
 			for it in 0..70 {
 				let msg = format!("Schnorrkel {}!", it);
@@ -1770,8 +1823,10 @@ mod tests {
 				crypto::sr25519_batch_verify(&signature, msg.as_bytes(), &pair.public());
 			}
 
-			// push invlaid
-			crypto::sr25519_batch_verify(&zero_sr_sig(), &Vec::new(), &zero_sr_pub());
+			// push invalid
+			let msg = b"asdf!";
+			let signature = pair.sign(msg);
+			crypto::sr25519_batch_verify(&signature, msg, &pair_unused.public());
 			assert!(!crypto::finish_batch_verify());
 
 			crypto::start_batch_verify();
@@ -1806,10 +1861,10 @@ mod tests {
 		ext.register_extension(TaskExecutorExt::new(TaskExecutor::new()));
 
 		ext.execute_with(|| {
-			// invalid ed25519 signature
+			// valid ed25519 signature
 			crypto::start_batch_verify();
 			crypto::ed25519_batch_verify(&zero_ed_sig(), &Vec::new(), &zero_ed_pub());
-			assert!(!crypto::finish_batch_verify());
+			assert!(crypto::finish_batch_verify());
 
 			// 2 valid ed25519 signatures
 			crypto::start_batch_verify();
@@ -1829,12 +1884,14 @@ mod tests {
 			// 1 valid, 1 invalid ed25519 signature
 			crypto::start_batch_verify();
 
-			let pair = ed25519::Pair::generate_with_phrase(None).0;
+			let pair1 = ed25519::Pair::generate_with_phrase(None).0;
+			let pair2 = ed25519::Pair::generate_with_phrase(None).0;
 			let msg = b"Important message";
-			let signature = pair.sign(msg);
-			crypto::ed25519_batch_verify(&signature, msg, &pair.public());
+			let signature = pair1.sign(msg);
 
 			crypto::ed25519_batch_verify(&zero_ed_sig(), &Vec::new(), &zero_ed_pub());
+			crypto::ed25519_batch_verify(&signature, msg, &pair1.public());
+			crypto::ed25519_batch_verify(&signature, msg, &pair2.public());
 
 			assert!(!crypto::finish_batch_verify());
 
@@ -1861,14 +1918,50 @@ mod tests {
 			// 1 valid sr25519, 1 invalid sr25519
 			crypto::start_batch_verify();
 
-			let pair = sr25519::Pair::generate_with_phrase(None).0;
+			let pair1 = sr25519::Pair::generate_with_phrase(None).0;
+			let pair2 = sr25519::Pair::generate_with_phrase(None).0;
 			let msg = b"Schnorrkcel!";
-			let signature = pair.sign(msg);
-			crypto::sr25519_batch_verify(&signature, msg, &pair.public());
+			let signature = pair1.sign(msg);
 
+			crypto::sr25519_batch_verify(&signature, msg, &pair1.public());
+			crypto::sr25519_batch_verify(&signature, msg, &pair2.public());
 			crypto::sr25519_batch_verify(&zero_sr_sig(), &Vec::new(), &zero_sr_pub());
 
 			assert!(!crypto::finish_batch_verify());
+		});
+	}
+
+	#[test]
+	fn use_dalek_ext_works() {
+		let mut ext = BasicExternalities::default();
+		ext.register_extension(UseDalekExt::default());
+
+		// With dalek the zero signature should fail to verify.
+		ext.execute_with(|| {
+			assert!(!crypto::ed25519_verify(&zero_ed_sig(), &Vec::new(), &zero_ed_pub()));
+		});
+
+		// But with zebra it should work.
+		BasicExternalities::default().execute_with(|| {
+			assert!(crypto::ed25519_verify(&zero_ed_sig(), &Vec::new(), &zero_ed_pub()));
+		})
+	}
+
+	#[test]
+	fn dalek_should_not_panic_on_invalid_signature() {
+		let mut ext = BasicExternalities::default();
+		ext.register_extension(UseDalekExt::default());
+
+		ext.execute_with(|| {
+			let mut bytes = [0u8; 64];
+			// Make it invalid
+			bytes[63] = 0b1110_0000;
+
+			assert!(!crypto::ed25519_verify(
+				&ed25519::Signature::from_raw(bytes),
+				&Vec::new(),
+				&zero_ed_pub()
+			));
 		});
 	}
 }

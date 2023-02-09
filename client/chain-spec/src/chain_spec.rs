@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -20,7 +20,7 @@
 #![warn(missing_docs)]
 
 use crate::{extension::GetExtension, ChainType, Properties, RuntimeGenesis};
-use sc_network::config::MultiaddrWithPeerId;
+use sc_network_common::config::MultiaddrWithPeerId;
 use sc_telemetry::TelemetryEndpoints;
 use serde::{Deserialize, Serialize};
 use serde_json as json;
@@ -61,7 +61,16 @@ impl<G: RuntimeGenesis> GenesisSource<G> {
 				let file = File::open(path).map_err(|e| {
 					format!("Error opening spec file at `{}`: {}", path.display(), e)
 				})?;
-				let genesis: GenesisContainer<G> = json::from_reader(file)
+				// SAFETY: `mmap` is fundamentally unsafe since technically the file can change
+				//         underneath us while it is mapped; in practice it's unlikely to be a
+				//         problem
+				let bytes = unsafe {
+					memmap2::Mmap::map(&file).map_err(|e| {
+						format!("Error mmaping spec file `{}`: {}", path.display(), e)
+					})?
+				};
+
+				let genesis: GenesisContainer<G> = json::from_slice(&bytes)
 					.map_err(|e| format!("Error parsing spec file: {}", e))?;
 				Ok(genesis.genesis)
 			},
@@ -100,34 +109,27 @@ impl<G: RuntimeGenesis> GenesisSource<G> {
 }
 
 impl<G: RuntimeGenesis, E> BuildStorage for ChainSpec<G, E> {
-	fn build_storage(&self) -> Result<Storage, String> {
+	fn assimilate_storage(&self, storage: &mut Storage) -> Result<(), String> {
 		match self.genesis.resolve()? {
-			Genesis::Runtime(gc) => gc.build_storage(),
-			Genesis::Raw(RawGenesis { top: map, children_default: children_map }) => Ok(Storage {
-				top: map.into_iter().map(|(k, v)| (k.0, v.0)).collect(),
-				children_default: children_map
-					.into_iter()
-					.map(|(storage_key, child_content)| {
-						let child_info = ChildInfo::new_default(storage_key.0.as_slice());
-						(
-							storage_key.0,
-							StorageChild {
-								data: child_content.into_iter().map(|(k, v)| (k.0, v.0)).collect(),
-								child_info,
-							},
-						)
-					})
-					.collect(),
-			}),
+			Genesis::Runtime(gc) => gc.assimilate_storage(storage),
+			Genesis::Raw(RawGenesis { top: map, children_default: children_map }) => {
+				storage.top.extend(map.into_iter().map(|(k, v)| (k.0, v.0)));
+				children_map.into_iter().for_each(|(k, v)| {
+					let child_info = ChildInfo::new_default(k.0.as_slice());
+					storage
+						.children_default
+						.entry(k.0)
+						.or_insert_with(|| StorageChild { data: Default::default(), child_info })
+						.data
+						.extend(v.into_iter().map(|(k, v)| (k.0, v.0)));
+				});
+				Ok(())
+			},
 			// The `StateRootHash` variant exists as a way to keep note that other clients support
 			// it, but Substrate itself isn't capable of loading chain specs with just a hash at the
 			// moment.
 			Genesis::StateRootHash(_) => Err("Genesis storage in hash format not supported".into()),
 		}
-	}
-
-	fn assimilate_storage(&self, _: &mut Storage) -> Result<(), String> {
-		Err("`assimilate_storage` not implemented for `ChainSpec`.".into())
 	}
 }
 
@@ -164,21 +166,25 @@ struct ClientSpec<E> {
 	boot_nodes: Vec<MultiaddrWithPeerId>,
 	telemetry_endpoints: Option<TelemetryEndpoints>,
 	protocol_id: Option<String>,
+	/// Arbitrary string. Nodes will only synchronize with other nodes that have the same value
+	/// in their `fork_id`. This can be used in order to segregate nodes in cases when multiple
+	/// chains have the same genesis hash.
+	#[serde(default = "Default::default", skip_serializing_if = "Option::is_none")]
+	fork_id: Option<String>,
 	properties: Option<Properties>,
 	#[serde(flatten)]
 	extensions: E,
 	// Never used, left only for backward compatibility.
-	// In a future version, a `skip_serializing` attribute should be added in order to no longer
-	// generate chain specs with this field.
-	#[serde(default)]
+	#[serde(default, skip_serializing)]
+	#[allow(unused)]
 	consensus_engine: (),
 	#[serde(skip_serializing)]
 	#[allow(unused)]
 	genesis: serde::de::IgnoredAny,
-	/// Mapping from `block_hash` to `wasm_code`.
+	/// Mapping from `block_number` to `wasm_code`.
 	///
-	/// The given `wasm_code` will be used to substitute the on-chain wasm code from the given
-	/// block hash onwards.
+	/// The given `wasm_code` will be used to substitute the on-chain wasm code starting with the
+	/// given block number until the `spec_version` on chain changes.
 	#[serde(default)]
 	code_substitutes: BTreeMap<String, Bytes>,
 }
@@ -223,7 +229,12 @@ impl<G, E> ChainSpec<G, E> {
 
 	/// Network protocol id.
 	pub fn protocol_id(&self) -> Option<&str> {
-		self.client_spec.protocol_id.as_ref().map(String::as_str)
+		self.client_spec.protocol_id.as_deref()
+	}
+
+	/// Optional network fork identifier.
+	pub fn fork_id(&self) -> Option<&str> {
+		self.client_spec.fork_id.as_deref()
 	}
 
 	/// Additional loosly-typed properties of the chain.
@@ -257,6 +268,7 @@ impl<G, E> ChainSpec<G, E> {
 		boot_nodes: Vec<MultiaddrWithPeerId>,
 		telemetry_endpoints: Option<TelemetryEndpoints>,
 		protocol_id: Option<&str>,
+		fork_id: Option<&str>,
 		properties: Option<Properties>,
 		extensions: E,
 	) -> Self {
@@ -267,6 +279,7 @@ impl<G, E> ChainSpec<G, E> {
 			boot_nodes,
 			telemetry_endpoints,
 			protocol_id: protocol_id.map(str::to_owned),
+			fork_id: fork_id.map(str::to_owned),
 			properties,
 			extensions,
 			consensus_engine: (),
@@ -382,6 +395,10 @@ where
 
 	fn protocol_id(&self) -> Option<&str> {
 		ChainSpec::protocol_id(self)
+	}
+
+	fn fork_id(&self) -> Option<&str> {
+		ChainSpec::fork_id(self)
 	}
 
 	fn properties(&self) -> Properties {

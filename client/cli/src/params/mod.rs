@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2020-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2020-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -26,19 +26,30 @@ mod shared_params;
 mod transaction_pool_params;
 
 use crate::arg_enums::{CryptoScheme, OutputType};
-use sp_core::crypto::Ss58AddressFormat;
+use clap::Args;
+use sp_core::crypto::{Ss58AddressFormat, Ss58AddressFormatRegistry};
 use sp_runtime::{
 	generic::BlockId,
 	traits::{Block as BlockT, NumberFor},
 };
-use std::{convert::TryFrom, fmt::Debug, str::FromStr};
-use structopt::StructOpt;
+use std::{fmt::Debug, str::FromStr};
 
 pub use crate::params::{
 	database_params::*, import_params::*, keystore_params::*, network_params::*,
 	node_key_params::*, offchain_worker_params::*, pruning_params::*, shared_params::*,
 	transaction_pool_params::*,
 };
+
+/// Parse Ss58AddressFormat
+pub fn parse_ss58_address_format(x: &str) -> Result<Ss58AddressFormat, String> {
+	match Ss58AddressFormatRegistry::try_from(x) {
+		Ok(format_registry) => Ok(format_registry.into()),
+		Err(_) => Err(format!(
+			"Unable to parse variant. Known variants: {:?}",
+			Ss58AddressFormat::all_names()
+		)),
+	}
+}
 
 /// Wrapper type of `String` that holds an unsigned integer of arbitrary size, formatted as a
 /// decimal.
@@ -79,8 +90,8 @@ impl FromStr for BlockNumberOrHash {
 	type Err = String;
 
 	fn from_str(block_number: &str) -> Result<Self, Self::Err> {
-		if block_number.starts_with("0x") {
-			if let Some(pos) = &block_number[2..].chars().position(|c| !c.is_ascii_hexdigit()) {
+		if let Some(rest) = block_number.strip_prefix("0x") {
+			if let Some(pos) = rest.chars().position(|c| !c.is_ascii_hexdigit()) {
 				Err(format!(
 					"Expected block hash, found illegal hex character at position: {}",
 					2 + pos,
@@ -115,44 +126,31 @@ impl BlockNumberOrHash {
 }
 
 /// Optional flag for specifying crypto algorithm
-#[derive(Debug, StructOpt, Clone)]
+#[derive(Debug, Clone, Args)]
 pub struct CryptoSchemeFlag {
 	/// cryptography scheme
-	#[structopt(
-		long,
-		value_name = "SCHEME",
-		possible_values = &CryptoScheme::variants(),
-		case_insensitive = true,
-		default_value = "Sr25519"
-	)]
+	#[arg(long, value_name = "SCHEME", value_enum, ignore_case = true, default_value_t = CryptoScheme::Sr25519)]
 	pub scheme: CryptoScheme,
 }
 
 /// Optional flag for specifying output type
-#[derive(Debug, StructOpt, Clone)]
+#[derive(Debug, Clone, Args)]
 pub struct OutputTypeFlag {
 	/// output format
-	#[structopt(
-		long,
-		value_name = "FORMAT",
-		possible_values = &OutputType::variants(),
-		case_insensitive = true,
-		default_value = "Text"
-	)]
+	#[arg(long, value_name = "FORMAT", value_enum, ignore_case = true, default_value_t = OutputType::Text)]
 	pub output_type: OutputType,
 }
 
 /// Optional flag for specifying network scheme
-#[derive(Debug, StructOpt, Clone)]
+#[derive(Debug, Clone, Args)]
 pub struct NetworkSchemeFlag {
 	/// network address format
-	#[structopt(
+	#[arg(
+		short = 'n',
 		long,
 		value_name = "NETWORK",
-		short = "n",
-		possible_values = &Ss58AddressFormat::all_names()[..],
-		parse(try_from_str = Ss58AddressFormat::try_from),
-		case_insensitive = true,
+		ignore_case = true,
+		value_parser = parse_ss58_address_format,
 	)]
 	pub network: Option<Ss58AddressFormat>,
 }

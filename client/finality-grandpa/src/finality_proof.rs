@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2018-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2018-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -52,7 +52,7 @@ use crate::{
 	authorities::{AuthoritySetChangeId, AuthoritySetChanges},
 	best_justification,
 	justification::GrandpaJustification,
-	SharedAuthoritySet,
+	SharedAuthoritySet, LOG_TARGET,
 };
 
 const MAX_UNKNOWN_HEADERS: usize = 100_000;
@@ -132,17 +132,18 @@ pub struct FinalityProof<Header: HeaderT> {
 }
 
 /// Errors occurring when trying to prove finality
-#[derive(Debug, derive_more::Display, derive_more::From)]
+#[derive(Debug, thiserror::Error)]
 pub enum FinalityProofError {
 	/// The requested block has not yet been finalized.
-	#[display(fmt = "Block not yet finalized")]
+	#[error("Block not yet finalized")]
 	BlockNotYetFinalized,
 	/// The requested block is not covered by authority set changes. Likely this means the block is
 	/// in the latest authority set, and the subscription API is more appropriate.
-	#[display(fmt = "Block not covered by authority set changes")]
+	#[error("Block not covered by authority set changes")]
 	BlockNotInAuthoritySetChanges,
 	/// Errors originating from the client.
-	Client(sp_blockchain::Error),
+	#[error(transparent)]
+	Client(#[from] sp_blockchain::Error),
 }
 
 fn prove_finality<Block, B>(
@@ -162,7 +163,7 @@ where
 			"Requested finality proof for descendant of #{} while we only have finalized #{}.",
 			block, info.finalized_number,
 		);
-		trace!(target: "afg", "{}", &err);
+		trace!(target: LOG_TARGET, "{}", &err);
 		return Err(FinalityProofError::BlockNotYetFinalized)
 	}
 
@@ -174,7 +175,7 @@ where
 				justification
 			} else {
 				trace!(
-					target: "afg",
+					target: LOG_TARGET,
 					"No justification found for the latest finalized block. \
 					Returning empty proof.",
 				);
@@ -182,7 +183,9 @@ where
 			}
 		},
 		AuthoritySetChangeId::Set(_, last_block_for_set) => {
-			let last_block_for_set_id = BlockId::Number(last_block_for_set);
+			let last_block_for_set_id = backend
+				.blockchain()
+				.expect_block_hash_from_id(&BlockId::Number(last_block_for_set))?;
 			let justification = if let Some(grandpa_justification) = backend
 				.blockchain()
 				.justifications(last_block_for_set_id)?
@@ -191,7 +194,7 @@ where
 				grandpa_justification
 			} else {
 				trace!(
-					target: "afg",
+					target: LOG_TARGET,
 					"No justification found when making finality proof for {}. \
 					Returning empty proof.",
 					block,
@@ -202,7 +205,7 @@ where
 		},
 		AuthoritySetChangeId::Unknown => {
 			warn!(
-				target: "afg",
+				target: LOG_TARGET,
 				"AuthoritySetChanges does not cover the requested block #{} due to missing data. \
 				 You need to resync to populate AuthoritySetChanges properly.",
 				block,
@@ -219,7 +222,8 @@ where
 			if current > just_block || headers.len() >= MAX_UNKNOWN_HEADERS {
 				break
 			}
-			headers.push(backend.blockchain().expect_header(BlockId::Number(current))?);
+			let hash = backend.blockchain().expect_block_hash_from_id(&BlockId::Number(current))?;
+			headers.push(backend.blockchain().expect_header(hash)?);
 			current += One::one();
 		}
 		headers
@@ -236,7 +240,7 @@ where
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
 	use super::*;
 	use crate::{authorities::AuthoritySetChanges, BlockNumberOps, ClientError, SetId};
 	use futures::executor::block_on;
@@ -270,6 +274,7 @@ pub(crate) mod tests {
 		let justification: GrandpaJustification<Block> =
 			Decode::decode(&mut &proof.justification[..])
 				.map_err(|_| ClientError::JustificationDecode)?;
+
 		justification.verify(current_set_id, &current_authorities)?;
 
 		Ok(proof)
@@ -307,7 +312,8 @@ pub(crate) mod tests {
 		}
 
 		for block in to_finalize {
-			client.finalize_block(BlockId::Number(*block), None).unwrap();
+			let hash = blocks[*block as usize - 1].hash();
+			client.finalize_block(hash, None).unwrap();
 		}
 		(client, backend, blocks)
 	}
@@ -369,7 +375,7 @@ pub(crate) mod tests {
 
 	#[test]
 	fn finality_proof_check_fails_with_incomplete_justification() {
-		let (client, _, blocks) = test_blockchain(8, &[4, 5, 8]);
+		let (_, _, blocks) = test_blockchain(8, &[4, 5, 8]);
 
 		// Create a commit without precommits
 		let commit = finality_grandpa::Commit {
@@ -377,7 +383,14 @@ pub(crate) mod tests {
 			target_number: *blocks[7].header().number(),
 			precommits: Vec::new(),
 		};
-		let grandpa_just = GrandpaJustification::from_commit(&client, 8, commit).unwrap();
+
+		let grandpa_just: GrandpaJustification<Block> =
+			sp_finality_grandpa::GrandpaJustification::<Header> {
+				round: 8,
+				votes_ancestries: Vec::new(),
+				commit,
+			}
+			.into();
 
 		let finality_proof = FinalityProof {
 			block: header(2).hash(),
@@ -480,7 +493,7 @@ pub(crate) mod tests {
 		let grandpa_just8 = GrandpaJustification::from_commit(&client, round, commit).unwrap();
 
 		client
-			.finalize_block(BlockId::Number(8), Some((ID, grandpa_just8.encode().clone())))
+			.finalize_block(block8.hash(), Some((ID, grandpa_just8.encode().clone())))
 			.unwrap();
 
 		// Authority set change at block 8, so the justification stored there will be used in the

@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2018-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2018-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,14 +22,14 @@ use sc_client_api::{backend::Finalizer, client::BlockBackend};
 use sc_consensus::{BlockImport, BlockImportParams, ForkChoiceStrategy};
 use sc_service::client::Client;
 use sp_consensus::{BlockOrigin, Error as ConsensusError};
-use sp_runtime::{generic::BlockId, traits::Block as BlockT, Justification, Justifications};
+use sp_runtime::{traits::Block as BlockT, Justification, Justifications};
 
 /// Extension trait for a test client.
 pub trait ClientExt<Block: BlockT>: Sized {
 	/// Finalize a block.
 	fn finalize_block(
 		&self,
-		id: BlockId<Block>,
+		hash: Block::Hash,
 		justification: Option<Justification>,
 	) -> sp_blockchain::Result<()>;
 
@@ -75,10 +75,10 @@ where
 {
 	fn finalize_block(
 		&self,
-		id: BlockId<Block>,
+		hash: Block::Hash,
 		justification: Option<Justification>,
 	) -> sp_blockchain::Result<()> {
-		Finalizer::finalize_block(self, id, justification, true)
+		Finalizer::finalize_block(self, hash, justification, true)
 	}
 
 	fn genesis_hash(&self) -> <Block as BlockT>::Hash {

@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2018-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2018-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -134,7 +134,7 @@ impl substrate_test_client::GenesisInit for GenesisParameters {
 				.insert(sp_core::storage::well_known_keys::CODE.to_vec(), code.clone());
 		}
 
-		let child_roots = storage.children_default.iter().map(|(_sk, child_content)| {
+		let child_roots = storage.children_default.values().map(|child_content| {
 			let state_root =
 				<<<runtime::Block as BlockT>::Header as HeaderT>::Hashing as HashT>::trie_root(
 					child_content.data.clone().into_iter().collect(),

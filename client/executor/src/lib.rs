@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -49,7 +49,8 @@ pub use sp_wasm_interface;
 pub use wasm_runtime::{read_embedded_version, WasmExecutionMethod};
 pub use wasmi;
 
-pub use sc_executor_common::{error, sandbox};
+pub use sc_executor_common::error;
+pub use sc_executor_wasmtime::InstantiationStrategy as WasmtimeInstantiationStrategy;
 
 /// Extracts the runtime version of a given runtime code.
 pub trait RuntimeVersionOf {
@@ -82,7 +83,7 @@ mod tests {
 		);
 		let res = executor
 			.uncached_call(
-				RuntimeBlob::uncompress_if_needed(&wasm_binary_unwrap()[..]).unwrap(),
+				RuntimeBlob::uncompress_if_needed(wasm_binary_unwrap()).unwrap(),
 				&mut ext,
 				true,
 				"test_empty_return",

@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,7 +21,7 @@ use sp_arithmetic::biguint::{BigUint, Single};
 
 fn random_big_uint(size: usize) -> BigUint {
 	let mut rng = rand::thread_rng();
-	let digits: Vec<_> = (0..size).map(|_| rng.gen_range(0, Single::max_value())).collect();
+	let digits: Vec<_> = (0..size).map(|_| rng.gen_range(0..Single::MAX)).collect();
 	BigUint::from_limbs(&digits)
 }
 
@@ -41,19 +41,19 @@ fn bench_op<F: Fn(&BigUint, &BigUint)>(c: &mut Criterion, name: &str, op: F) {
 
 fn bench_addition(c: &mut Criterion) {
 	bench_op(c, "addition", |a, b| {
-		let _ = a.clone().add(&b);
+		let _ = a.clone().add(b);
 	});
 }
 
 fn bench_subtraction(c: &mut Criterion) {
 	bench_op(c, "subtraction", |a, b| {
-		let _ = a.clone().sub(&b);
+		let _ = a.clone().sub(b);
 	});
 }
 
 fn bench_multiplication(c: &mut Criterion) {
 	bench_op(c, "multiplication", |a, b| {
-		let _ = a.clone().mul(&b);
+		let _ = a.clone().mul(b);
 	});
 }
 
@@ -64,7 +64,7 @@ fn bench_division(c: &mut Criterion) {
 		group.throughput(Throughput::Elements(*size));
 		group.bench_with_input(BenchmarkId::from_parameter(size), size, |bencher, &size| {
 			let a = random_big_uint(size as usize);
-			let b = random_big_uint(rand::thread_rng().gen_range(2, size as usize));
+			let b = random_big_uint(rand::thread_rng().gen_range(2..size as usize));
 
 			bencher.iter(|| {
 				let _ = a.clone().div(&b, true);

@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2020-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2020-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -94,7 +94,7 @@ fn merge<A: IdentifierT>(voter_root_path: Vec<NodeRef<A>>, target_root_path: Vec
 	shorter_path
 		.iter()
 		.zip(shorter_path.iter().skip(1))
-		.for_each(|(voter, next)| Node::set_parent_of(&next, &voter));
+		.for_each(|(voter, next)| Node::set_parent_of(next, voter));
 	Node::set_parent_of(&shorter_path[0], &longer_path[0]);
 }
 
@@ -275,9 +275,8 @@ fn reduce_4<A: IdentifierT>(assignments: &mut Vec<StakedAssignment<A>>) -> u32 {
 						});
 
 						// remove either one of them.
-						let who_removed = remove_indices.iter().find(|i| **i < 2usize).is_some();
-						let other_removed =
-							remove_indices.into_iter().find(|i| *i >= 2usize).is_some();
+						let who_removed = remove_indices.iter().any(|i| *i < 2usize);
+						let other_removed = remove_indices.into_iter().any(|i| i >= 2usize);
 
 						match (who_removed, other_removed) {
 							(false, true) => {
@@ -525,12 +524,10 @@ fn reduce_all<A: IdentifierT>(assignments: &mut Vec<StakedAssignment<A>>) -> u32
 											} else {
 												ass.distribution[idx].1.saturating_sub(min_value)
 											}
+										} else if start_operation_add {
+											ass.distribution[idx].1.saturating_sub(min_value)
 										} else {
-											if start_operation_add {
-												ass.distribution[idx].1.saturating_sub(min_value)
-											} else {
-												ass.distribution[idx].1.saturating_add(min_value)
-											}
+											ass.distribution[idx].1.saturating_add(min_value)
 										};
 
 										if next_value.is_zero() {
@@ -570,12 +567,10 @@ fn reduce_all<A: IdentifierT>(assignments: &mut Vec<StakedAssignment<A>>) -> u32
 											} else {
 												ass.distribution[idx].1.saturating_add(min_value)
 											}
+										} else if start_operation_add {
+											ass.distribution[idx].1.saturating_add(min_value)
 										} else {
-											if start_operation_add {
-												ass.distribution[idx].1.saturating_add(min_value)
-											} else {
-												ass.distribution[idx].1.saturating_sub(min_value)
-											}
+											ass.distribution[idx].1.saturating_sub(min_value)
 										};
 
 										if next_value.is_zero() {

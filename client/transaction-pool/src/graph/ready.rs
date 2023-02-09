@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2018-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2018-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -23,6 +23,7 @@ use std::{
 	sync::Arc,
 };
 
+use crate::LOG_TARGET;
 use log::{debug, trace};
 use sc_transaction_pool_api::error;
 use serde::Serialize;
@@ -37,7 +38,7 @@ use super::{
 /// An in-pool transaction reference.
 ///
 /// Should be cheap to clone.
-#[derive(Debug, parity_util_mem::MallocSizeOf)]
+#[derive(Debug)]
 pub struct TransactionRef<Hash, Ex> {
 	/// The actual transaction data.
 	pub transaction: Arc<Transaction<Hash, Ex>>,
@@ -74,7 +75,7 @@ impl<Hash, Ex> PartialEq for TransactionRef<Hash, Ex> {
 }
 impl<Hash, Ex> Eq for TransactionRef<Hash, Ex> {}
 
-#[derive(Debug, parity_util_mem::MallocSizeOf)]
+#[derive(Debug)]
 pub struct ReadyTx<Hash, Ex> {
 	/// A reference to a transaction
 	pub transaction: TransactionRef<Hash, Ex>,
@@ -105,7 +106,7 @@ qed
 "#;
 
 /// Validated transactions that are block ready with all their dependencies met.
-#[derive(Debug, parity_util_mem::MallocSizeOf)]
+#[derive(Debug)]
 pub struct ReadyTransactions<Hash: hash::Hash + Eq, Ex> {
 	/// Next free insertion id (used to indicate when a transaction was inserted into the pool).
 	insertion_id: u64,
@@ -300,7 +301,7 @@ impl<Hash: hash::Hash + Member + Serialize, Ex> ReadyTransactions<Hash, Ex> {
 				for tag in &tx.transaction.transaction.requires {
 					if let Some(hash) = self.provided_tags.get(tag) {
 						if let Some(tx) = ready.get_mut(hash) {
-							remove_item(&mut tx.unlocks, &hash);
+							remove_item(&mut tx.unlocks, hash);
 						}
 					}
 				}
@@ -314,7 +315,7 @@ impl<Hash: hash::Hash + Member + Serialize, Ex> ReadyTransactions<Hash, Ex> {
 				}
 
 				// add to removed
-				trace!(target: "txpool", "[{:?}] Removed as part of the subtree.", hash);
+				trace!(target: LOG_TARGET, "[{:?}] Removed as part of the subtree.", hash);
 				removed.push(tx.transaction.transaction);
 			}
 		}
@@ -351,7 +352,7 @@ impl<Hash: hash::Hash + Member + Serialize, Ex> ReadyTransactions<Hash, Ex> {
 					let mut ready = self.ready.write();
 					let mut find_previous = |tag| -> Option<Vec<Tag>> {
 						let prev_hash = self.provided_tags.get(tag)?;
-						let tx2 = ready.get_mut(&prev_hash)?;
+						let tx2 = ready.get_mut(prev_hash)?;
 						remove_item(&mut tx2.unlocks, hash);
 						// We eagerly prune previous transactions as well.
 						// But it might not always be good.
@@ -521,7 +522,7 @@ impl<Hash: hash::Hash + Member, Ex> BestIterator<Hash, Ex> {
 	pub fn report_invalid(&mut self, tx: &Arc<Transaction<Hash, Ex>>) {
 		if let Some(to_report) = self.all.get(&tx.hash) {
 			debug!(
-				target: "txpool",
+				target: LOG_TARGET,
 				"[{:?}] Reported as invalid. Will skip sub-chains while iterating.",
 				to_report.transaction.transaction.hash
 			);
@@ -544,14 +545,13 @@ impl<Hash: hash::Hash + Member, Ex> Iterator for BestIterator<Hash, Ex> {
 			// Check if the transaction was marked invalid.
 			if self.invalid.contains(hash) {
 				debug!(
-					target: "txpool",
-					"[{:?}] Skipping invalid child transaction while iterating.",
-					hash
+					target: LOG_TARGET,
+					"[{:?}] Skipping invalid child transaction while iterating.", hash,
 				);
 				continue
 			}
 
-			let ready = match self.all.get(&hash).cloned() {
+			let ready = match self.all.get(hash).cloned() {
 				Some(ready) => ready,
 				// The transaction is not in all, maybe it was removed in the meantime?
 				None => continue,
@@ -740,25 +740,6 @@ mod tests {
 		assert_eq!(it.next(), Some(6));
 		assert_eq!(it.next(), Some(7));
 		assert_eq!(it.next(), None);
-	}
-
-	#[test]
-	fn can_report_heap_size() {
-		let mut ready = ReadyTransactions::default();
-		let tx = Transaction {
-			data: vec![5],
-			bytes: 1,
-			hash: 5,
-			priority: 1,
-			valid_till: u64::MAX, // use the max here for testing.
-			requires: vec![],
-			provides: vec![],
-			propagate: true,
-			source: Source::External,
-		};
-		import(&mut ready, tx).unwrap();
-
-		assert!(parity_util_mem::malloc_size(&ready) > 200);
 	}
 
 	#[test]

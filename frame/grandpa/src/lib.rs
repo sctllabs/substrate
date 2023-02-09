@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -37,16 +37,17 @@ use codec::{self as codec, Decode, Encode, MaxEncodedLen};
 pub use fg_primitives::{AuthorityId, AuthorityList, AuthorityWeight, VersionedAuthorityList};
 use fg_primitives::{
 	ConsensusLog, EquivocationProof, ScheduledChange, SetId, GRANDPA_AUTHORITIES_KEY,
-	GRANDPA_ENGINE_ID,
+	GRANDPA_ENGINE_ID, RUNTIME_LOG_TARGET as LOG_TARGET,
 };
 use frame_support::{
-	dispatch::DispatchResultWithPostInfo,
+	dispatch::{DispatchResultWithPostInfo, Pays},
 	pallet_prelude::Get,
 	storage,
-	traits::{KeyOwnerProofSystem, OneSessionHandler, StorageVersion},
-	weights::{Pays, Weight},
+	traits::{KeyOwnerProofSystem, OneSessionHandler},
+	weights::Weight,
 	WeakBoundedVec,
 };
+use scale_info::TypeInfo;
 use sp_runtime::{generic::DigestItem, traits::Zero, DispatchResult, KeyTypeId};
 use sp_session::{GetSessionNumber, GetValidatorCount};
 use sp_staking::SessionIndex;
@@ -69,32 +70,26 @@ pub use equivocation::{
 
 pub use pallet::*;
 
-use scale_info::TypeInfo;
-
-/// The current storage version.
-const STORAGE_VERSION: StorageVersion = StorageVersion::new(4);
-
 #[frame_support::pallet]
 pub mod pallet {
 	use super::*;
-	use frame_support::pallet_prelude::*;
+	use frame_support::{dispatch::DispatchResult, pallet_prelude::*};
 	use frame_system::pallet_prelude::*;
+
+	/// The current storage version.
+	const STORAGE_VERSION: StorageVersion = StorageVersion::new(4);
 
 	#[pallet::pallet]
 	#[pallet::generate_store(pub(super) trait Store)]
 	#[pallet::storage_version(STORAGE_VERSION)]
-	#[pallet::generate_storage_info]
 	pub struct Pallet<T>(_);
 
 	#[pallet::config]
 	pub trait Config: frame_system::Config {
 		/// The event type of this module.
-		type Event: From<Event>
-			+ Into<<Self as frame_system::Config>::Event>
-			+ IsType<<Self as frame_system::Config>::Event>;
-
-		/// The function call.
-		type Call: From<Call<Self>>;
+		type RuntimeEvent: From<Event>
+			+ Into<<Self as frame_system::Config>::RuntimeEvent>
+			+ IsType<<Self as frame_system::Config>::RuntimeEvent>;
 
 		/// The proof of key ownership, used for validating equivocation reports
 		/// The proof must include the session index and validator count of the
@@ -126,6 +121,15 @@ pub mod pallet {
 		/// Max Authorities in use
 		#[pallet::constant]
 		type MaxAuthorities: Get<u32>;
+
+		/// The maximum number of entries to keep in the set id to session index mapping.
+		///
+		/// Since the `SetIdSession` map is only used for validating equivocations this
+		/// value should relate to the bonding duration of whatever staking system is
+		/// being used (if any). If equivocation handling is not enabled then this value
+		/// can be zero.
+		#[pallet::constant]
+		type MaxSetIdSessionEntries: Get<u64>;
 	}
 
 	#[pallet::hooks]
@@ -198,6 +202,7 @@ pub mod pallet {
 		/// equivocation proof and validate the given key ownership proof
 		/// against the extracted offender. If both are valid, the offence
 		/// will be reported.
+		#[pallet::call_index(0)]
 		#[pallet::weight(T::WeightInfo::report_equivocation(key_owner_proof.validator_count()))]
 		pub fn report_equivocation(
 			origin: OriginFor<T>,
@@ -218,6 +223,7 @@ pub mod pallet {
 		/// block authors will call it (validated in `ValidateUnsigned`), as such
 		/// if the block author is defined it will be defined as the equivocation
 		/// reporter.
+		#[pallet::call_index(1)]
 		#[pallet::weight(T::WeightInfo::report_equivocation(key_owner_proof.validator_count()))]
 		pub fn report_equivocation_unsigned(
 			origin: OriginFor<T>,
@@ -233,22 +239,29 @@ pub mod pallet {
 			)
 		}
 
-		/// Note that the current authority set of the GRANDPA finality gadget has
-		/// stalled. This will trigger a forced authority set change at the beginning
-		/// of the next session, to be enacted `delay` blocks after that. The delay
-		/// should be high enough to safely assume that the block signalling the
-		/// forced change will not be re-orged (e.g. 1000 blocks). The GRANDPA voters
-		/// will start the new authority set using the given finalized block as base.
+		/// Note that the current authority set of the GRANDPA finality gadget has stalled.
+		///
+		/// This will trigger a forced authority set change at the beginning of the next session, to
+		/// be enacted `delay` blocks after that. The `delay` should be high enough to safely assume
+		/// that the block signalling the forced change will not be re-orged e.g. 1000 blocks.
+		/// The block production rate (which may be slowed down because of finality lagging) should
+		/// be taken into account when choosing the `delay`. The GRANDPA voters based on the new
+		/// authority will start voting on top of `best_finalized_block_number` for new finalized
+		/// blocks. `best_finalized_block_number` should be the highest of the latest finalized
+		/// block of all validators of the new authority set.
+		///
 		/// Only callable by root.
+		#[pallet::call_index(2)]
 		#[pallet::weight(T::WeightInfo::note_stalled())]
 		pub fn note_stalled(
 			origin: OriginFor<T>,
 			delay: T::BlockNumber,
 			best_finalized_block_number: T::BlockNumber,
-		) -> DispatchResultWithPostInfo {
+		) -> DispatchResult {
 			ensure_root(origin)?;
 
-			Ok(Self::on_stalled(delay, best_finalized_block_number).into())
+			Self::on_stalled(delay, best_finalized_block_number);
+			Ok(())
 		}
 	}
 
@@ -262,9 +275,6 @@ pub mod pallet {
 		/// Current authority set has been resumed.
 		Resumed,
 	}
-
-	#[deprecated(note = "use `Event` instead")]
-	pub type RawEvent = Event;
 
 	#[pallet::error]
 	pub enum Error<T> {
@@ -322,21 +332,21 @@ pub mod pallet {
 	/// A mapping from grandpa set ID to the index of the *most recent* session for which its
 	/// members were responsible.
 	///
+	/// This is only used for validating equivocation proofs. An equivocation proof must
+	/// contains a key-ownership proof for a given session, therefore we need a way to tie
+	/// together sessions and GRANDPA set ids, i.e. we need to validate that a validator
+	/// was the owner of a given key on a given session, and what the active set ID was
+	/// during that session.
+	///
 	/// TWOX-NOTE: `SetId` is not under user control.
 	#[pallet::storage]
 	#[pallet::getter(fn session_for_set)]
 	pub(super) type SetIdSession<T: Config> = StorageMap<_, Twox64Concat, SetId, SessionIndex>;
 
+	#[cfg_attr(feature = "std", derive(Default))]
 	#[pallet::genesis_config]
 	pub struct GenesisConfig {
 		pub authorities: AuthorityList,
-	}
-
-	#[cfg(feature = "std")]
-	impl Default for GenesisConfig {
-		fn default() -> Self {
-			Self { authorities: Default::default() }
-		}
 	}
 
 	#[pallet::genesis_build]
@@ -371,13 +381,9 @@ pub type BoundedAuthorityList<Limit> = WeakBoundedVec<(AuthorityId, AuthorityWei
 /// A stored pending change.
 /// `Limit` is the bound for `next_authorities`
 #[derive(Encode, Decode, TypeInfo, MaxEncodedLen)]
-#[codec(mel_bound(Limit: Get<u32>))]
+#[codec(mel_bound(N: MaxEncodedLen, Limit: Get<u32>))]
 #[scale_info(skip_type_params(Limit))]
-pub struct StoredPendingChange<N, Limit>
-where
-	Limit: Get<u32>,
-	N: MaxEncodedLen,
-{
+pub struct StoredPendingChange<N, Limit> {
 	/// The block number this was scheduled at.
 	pub scheduled_at: N,
 	/// The delay in blocks until it will be applied.
@@ -437,7 +443,7 @@ impl<T: Config> Pallet<T> {
 
 			Ok(())
 		} else {
-			Err(Error::<T>::PauseFailed)?
+			Err(Error::<T>::PauseFailed.into())
 		}
 	}
 
@@ -449,7 +455,7 @@ impl<T: Config> Pallet<T> {
 
 			Ok(())
 		} else {
-			Err(Error::<T>::ResumeFailed)?
+			Err(Error::<T>::ResumeFailed.into())
 		}
 	}
 
@@ -475,9 +481,9 @@ impl<T: Config> Pallet<T> {
 		if !<PendingChange<T>>::exists() {
 			let scheduled_at = <frame_system::Pallet<T>>::block_number();
 
-			if let Some(_) = forced {
+			if forced.is_some() {
 				if Self::next_forced().map_or(false, |next| next > scheduled_at) {
-					Err(Error::<T>::TooSoon)?
+					return Err(Error::<T>::TooSoon.into())
 				}
 
 				// only allow the next forced change when twice the window has passed since
@@ -502,14 +508,14 @@ impl<T: Config> Pallet<T> {
 
 			Ok(())
 		} else {
-			Err(Error::<T>::ChangePending)?
+			Err(Error::<T>::ChangePending.into())
 		}
 	}
 
 	/// Deposit one of this module's logs.
 	fn deposit_log(log: ConsensusLog<T::BlockNumber>) {
 		let log = DigestItem::Consensus(GRANDPA_ENGINE_ID, log.encode());
-		<frame_system::Pallet<T>>::deposit_log(log.into());
+		<frame_system::Pallet<T>>::deposit_log(log);
 	}
 
 	// Perform module initialization, abstracted so that it can be called either through genesis
@@ -558,14 +564,14 @@ impl<T: Config> Pallet<T> {
 		let previous_set_id_session_index = if set_id == 0 {
 			None
 		} else {
-			let session_index = Self::session_for_set(set_id - 1)
-				.ok_or_else(|| Error::<T>::InvalidEquivocationProof)?;
+			let session_index =
+				Self::session_for_set(set_id - 1).ok_or(Error::<T>::InvalidEquivocationProof)?;
 
 			Some(session_index)
 		};
 
 		let set_id_session_index =
-			Self::session_for_set(set_id).ok_or_else(|| Error::<T>::InvalidEquivocationProof)?;
+			Self::session_for_set(set_id).ok_or(Error::<T>::InvalidEquivocationProof)?;
 
 		// check that the session id for the membership proof is within the
 		// bounds of the set id reported in the equivocation.
@@ -652,10 +658,17 @@ where
 			};
 
 			if res.is_ok() {
-				CurrentSetId::<T>::mutate(|s| {
+				let current_set_id = CurrentSetId::<T>::mutate(|s| {
 					*s += 1;
 					*s
-				})
+				});
+
+				let max_set_id_session_entries = T::MaxSetIdSessionEntries::get().max(1);
+				if current_set_id >= max_set_id_session_entries {
+					SetIdSession::<T>::remove(current_set_id - max_set_id_session_entries);
+				}
+
+				current_set_id
 			} else {
 				// either the session module signalled that the validators have changed
 				// or the set was stalled. but since we didn't successfully schedule
@@ -668,8 +681,8 @@ where
 			Self::current_set_id()
 		};
 
-		// if we didn't issue a change, we update the mapping to note that the current
-		// set corresponds to the latest equivalent session (i.e. now).
+		// update the mapping to note that the current set corresponds to the
+		// latest equivalent session (i.e. now).
 		let session_index = <pallet_session::Pallet<T>>::current_index();
 		SetIdSession::<T>::insert(current_set_id, &session_index);
 	}

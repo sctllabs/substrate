@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2020-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2020-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,13 +22,17 @@ use frame_support::{
 	pallet_prelude::*,
 	traits::StorageInfo,
 };
+use scale_info::TypeInfo;
+#[cfg(feature = "std")]
+use serde::{Deserialize, Serialize};
 use sp_io::hashing::blake2_256;
 use sp_runtime::traits::TrailingZeroInput;
 use sp_std::{prelude::Box, vec::Vec};
 use sp_storage::TrackedStorageKey;
 
 /// An alphabet of possible parameters to use for benchmarking.
-#[derive(Encode, Decode, Clone, Copy, PartialEq, Debug)]
+#[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
+#[derive(Encode, Decode, Clone, Copy, PartialEq, Debug, TypeInfo)]
 #[allow(missing_docs)]
 #[allow(non_camel_case_types)]
 pub enum BenchmarkParameter {
@@ -68,13 +72,17 @@ impl std::fmt::Display for BenchmarkParameter {
 }
 
 /// The results of a single of benchmark.
-#[derive(Encode, Decode, Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
+#[derive(Encode, Decode, Clone, PartialEq, Debug, TypeInfo)]
 pub struct BenchmarkBatch {
 	/// The pallet containing this benchmark.
+	#[cfg_attr(feature = "std", serde(with = "serde_as_str"))]
 	pub pallet: Vec<u8>,
 	/// The instance of this pallet being benchmarked.
+	#[cfg_attr(feature = "std", serde(with = "serde_as_str"))]
 	pub instance: Vec<u8>,
 	/// The extrinsic (or benchmark name) of this benchmark.
+	#[cfg_attr(feature = "std", serde(with = "serde_as_str"))]
 	pub benchmark: Vec<u8>,
 	/// The results from this benchmark.
 	pub results: Vec<BenchmarkResult>,
@@ -82,13 +90,17 @@ pub struct BenchmarkBatch {
 
 // TODO: could probably make API cleaner here.
 /// The results of a single of benchmark, where time and db results are separated.
+#[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
 #[derive(Encode, Decode, Clone, PartialEq, Debug)]
 pub struct BenchmarkBatchSplitResults {
 	/// The pallet containing this benchmark.
+	#[cfg_attr(feature = "std", serde(with = "serde_as_str"))]
 	pub pallet: Vec<u8>,
 	/// The instance of this pallet being benchmarked.
+	#[cfg_attr(feature = "std", serde(with = "serde_as_str"))]
 	pub instance: Vec<u8>,
 	/// The extrinsic (or benchmark name) of this benchmark.
+	#[cfg_attr(feature = "std", serde(with = "serde_as_str"))]
 	pub benchmark: Vec<u8>,
 	/// The extrinsic timing results from this benchmark.
 	pub time_results: Vec<BenchmarkResult>,
@@ -99,7 +111,8 @@ pub struct BenchmarkBatchSplitResults {
 /// Result from running benchmarks on a FRAME pallet.
 /// Contains duration of the function call in nanoseconds along with the benchmark parameters
 /// used for that benchmark result.
-#[derive(Encode, Decode, Default, Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
+#[derive(Encode, Decode, Default, Clone, PartialEq, Debug, TypeInfo)]
 pub struct BenchmarkResult {
 	pub components: Vec<(BenchmarkParameter, u32)>,
 	pub extrinsic_time: u128,
@@ -109,12 +122,33 @@ pub struct BenchmarkResult {
 	pub writes: u32,
 	pub repeat_writes: u32,
 	pub proof_size: u32,
+	#[cfg_attr(feature = "std", serde(skip))]
 	pub keys: Vec<(Vec<u8>, u32, u32, bool)>,
 }
 
 impl BenchmarkResult {
 	pub fn from_weight(w: Weight) -> Self {
-		Self { extrinsic_time: (w as u128) / 1_000, ..Default::default() }
+		Self { extrinsic_time: (w.ref_time() / 1_000) as u128, ..Default::default() }
+	}
+}
+
+/// Helper module to make serde serialize `Vec<u8>` as strings.
+#[cfg(feature = "std")]
+mod serde_as_str {
+	pub fn serialize<S>(value: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
+	where
+		S: serde::Serializer,
+	{
+		let s = std::str::from_utf8(value).map_err(serde::ser::Error::custom)?;
+		serializer.collect_str(s)
+	}
+
+	pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+	where
+		D: serde::de::Deserializer<'de>,
+	{
+		let s: &str = serde::de::Deserialize::deserialize(deserializer)?;
+		Ok(s.into())
 	}
 }
 
@@ -129,6 +163,11 @@ pub enum BenchmarkError {
 	/// The benchmarking pipeline is allowed to fail here, and we should simply
 	/// skip processing these results.
 	Skip,
+	/// No weight can be determined; set the weight of this call to zero.
+	///
+	/// You can also use `Override` instead, but this is easier to use since `Override` expects the
+	/// correct components to be present.
+	Weightless,
 }
 
 impl From<BenchmarkError> for &'static str {
@@ -137,6 +176,7 @@ impl From<BenchmarkError> for &'static str {
 			BenchmarkError::Stop(s) => s,
 			BenchmarkError::Override(_) => "benchmark override",
 			BenchmarkError::Skip => "benchmark skip",
+			BenchmarkError::Weightless => "benchmark weightless",
 		}
 	}
 }
@@ -160,7 +200,7 @@ impl From<DispatchError> for BenchmarkError {
 }
 
 /// Configuration used to setup and run runtime benchmarks.
-#[derive(Encode, Decode, Default, Clone, PartialEq, Debug)]
+#[derive(Encode, Decode, Default, Clone, PartialEq, Debug, TypeInfo)]
 pub struct BenchmarkConfig {
 	/// The encoded name of the pallet to benchmark.
 	pub pallet: Vec<u8>,
@@ -177,17 +217,18 @@ pub struct BenchmarkConfig {
 /// A list of benchmarks available for a particular pallet and instance.
 ///
 /// All `Vec<u8>` must be valid utf8 strings.
-#[derive(Encode, Decode, Default, Clone, PartialEq, Debug)]
+#[derive(Encode, Decode, Default, Clone, PartialEq, Debug, TypeInfo)]
 pub struct BenchmarkList {
 	pub pallet: Vec<u8>,
 	pub instance: Vec<u8>,
 	pub benchmarks: Vec<BenchmarkMetadata>,
 }
 
-#[derive(Encode, Decode, Default, Clone, PartialEq, Debug)]
+#[derive(Encode, Decode, Default, Clone, PartialEq, Debug, TypeInfo)]
 pub struct BenchmarkMetadata {
 	pub name: Vec<u8>,
 	pub components: Vec<(BenchmarkParameter, u32, u32)>,
+	pub pov_modes: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 sp_api::decl_runtime_apis! {

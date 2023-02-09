@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,6 +15,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Custom inner attributes are unstable, so we need to faky disable the attribute.
+// rustfmt still honors the attribute to not format the rustdocs below.
+#![cfg_attr(feature = "never", rustfmt::skip)]
 //! Substrate runtime interface
 //!
 //! This crate provides types, traits and macros around runtime interfaces. A runtime interface is
@@ -94,14 +97,13 @@
 //! | `&str` | `u64` | <code>v.len() 32bit << 32 &#124; v.as_ptr() 32bit</code> |
 //! | `&[u8]` | `u64` | <code>v.len() 32bit << 32 &#124; v.as_ptr() 32bit</code> |
 //! | `Vec<u8>` | `u64` | <code>v.len() 32bit << 32 &#124; v.as_ptr() 32bit</code> |
-//! | `Vec<T> where T: Encode` | `u64` | `let e = v.encode();`<br><br><code>e.len() 32bit << 32
-//! &#124; e.as_ptr() 32bit</code> | | `&[T] where T: Encode` | `u64` | `let e =
-//! v.encode();`<br><br><code>e.len() 32bit << 32 &#124; e.as_ptr() 32bit</code> | | `[u8; N]` |
-//! `u32` | `v.as_ptr()` | | `*const T` | `u32` | `Identity` |
-//! | `Option<T>` | `u64` | `let e = v.encode();`<br><br><code>e.len() 32bit << 32 &#124; e.as_ptr()
-//! 32bit</code> | | [`T where T: PassBy<PassBy=Inner>`](./pass_by#Inner) | Depends on inner |
-//! Depends on inner | | [`T where T: PassBy<PassBy=Codec>`](./pass_by#Codec)|`u64`|<code>v.len()
-//! 32bit << 32 &#124;v.as_ptr() 32bit</code>|
+//! | `Vec<T> where T: Encode` | `u64` | `let e = v.encode();`<br><br><code>e.len() 32bit << 32 &#124; e.as_ptr() 32bit</code> |
+//! | `&[T] where T: Encode` | `u64` | `let e = v.encode();`<br><br><code>e.len() 32bit << 32 &#124; e.as_ptr() 32bit</code> |
+//! | `[u8; N]` | `u32` | `v.as_ptr()` |
+//! | `*const T` | `u32` | `Identity` |
+//! | `Option<T>` | `u64` | `let e = v.encode();`<br><br><code>e.len() 32bit << 32 &#124; e.as_ptr() 32bit</code> |
+//! | [`T where T: PassBy<PassBy=Inner>`](./pass_by#Inner) | Depends on inner | Depends on inner |
+//! | [`T where T: PassBy<PassBy=Codec>`](./pass_by#Codec)|`u64`|<code>v.len() 32bit << 32 &#124;v.as_ptr() 32bit</code>|
 //!
 //! `Identity` means that the value is converted directly into the corresponding FFI type.
 
@@ -153,6 +155,22 @@ pub use sp_std;
 ///         [17].to_vec()
 ///     }
 ///
+///     /// Call function, different version and only being registered.
+///     ///
+///     /// This `register_only` version is only being registered, aka exposed to the runtime,
+///     /// but the runtime will still use the version 2 of this function. This is useful for when
+///     /// new host functions should be introduced. Adding new host functions requires that all
+///     /// nodes have the host functions available, because otherwise they fail at instantiation
+///     /// of the runtime. With `register_only` the function will not be used when compiling the
+///     /// runtime, but it will already be there for a future version of the runtime that will
+///     /// switch to using these host function.
+///     #[version(3, register_only)]
+///     fn call(data: &[u8]) -> Vec<u8> {
+///         // Here you could call some rather complex code that only compiles on native or
+///         // is way faster in native than executing it in wasm.
+///         [18].to_vec()
+///     }
+///
 ///     /// A function can take a `&self` or `&mut self` argument to get access to the
 ///     /// `Externalities`. (The generated method does not require
 ///     /// this argument, so the function can be called just with the `optional` argument)
@@ -177,12 +195,14 @@ pub use sp_std;
 ///     trait Interface {
 ///         fn call_version_1(data: &[u8]) -> Vec<u8>;
 ///         fn call_version_2(data: &[u8]) -> Vec<u8>;
+///         fn call_version_3(data: &[u8]) -> Vec<u8>;
 ///         fn set_or_clear_version_1(&mut self, optional: Option<Vec<u8>>);
 ///     }
 ///
 ///     impl Interface for &mut dyn sp_externalities::Externalities {
 ///         fn call_version_1(data: &[u8]) -> Vec<u8> { Vec::new() }
 ///         fn call_version_2(data: &[u8]) -> Vec<u8> { [17].to_vec() }
+///         fn call_version_3(data: &[u8]) -> Vec<u8> { [18].to_vec() }
 ///         fn set_or_clear_version_1(&mut self, optional: Option<Vec<u8>>) {
 ///             match optional {
 ///                 Some(value) => self.set_storage([1, 2, 3, 4].to_vec(), value),
@@ -202,6 +222,10 @@ pub use sp_std;
 ///
 ///     fn call_version_2(data: &[u8]) -> Vec<u8> {
 ///         <&mut dyn sp_externalities::Externalities as Interface>::call_version_2(data)
+///     }
+///
+///     fn call_version_3(data: &[u8]) -> Vec<u8> {
+///         <&mut dyn sp_externalities::Externalities as Interface>::call_version_3(data)
 ///     }
 ///
 ///     pub fn set_or_clear(optional: Option<Vec<u8>>) {
@@ -285,11 +309,11 @@ pub use sp_std;
 /// This instructs the macro to make two significant changes to the generated code:
 ///
 /// 1. The generated functions are not callable from the native side.
-/// 2. The trait as shown above is not implemented for `Externalities` and is instead
-/// implemented    for `FunctionExecutor` (from `sp-wasm-interface`).
+/// 2. The trait as shown above is not implemented for [`Externalities`] and is instead
+/// implemented for `FunctionContext` (from `sp-wasm-interface`).
 ///
 /// # Disable tracing
-/// By addding `no_tracing` to the list of options you can prevent the wasm-side interface from
+/// By adding `no_tracing` to the list of options you can prevent the wasm-side interface from
 /// generating the default `sp-tracing`-calls. Note that this is rarely needed but only meant
 /// for the case when that would create a circular dependency. You usually _do not_ want to add
 /// this flag, as tracing doesn't cost you anything by default anyways (it is added as a no-op)

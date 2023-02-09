@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2018-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2018-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -18,6 +18,7 @@
 
 //! Chain api required for the transaction pool.
 
+use crate::LOG_TARGET;
 use codec::Encode;
 use futures::{
 	channel::{mpsc, oneshot},
@@ -30,6 +31,7 @@ use std::{marker::PhantomData, pin::Pin, sync::Arc};
 use prometheus_endpoint::Registry as PrometheusRegistry;
 use sc_client_api::{blockchain::HeaderBackend, BlockBackend};
 use sp_api::{ApiExt, ProvideRuntimeApi};
+use sp_blockchain::{HeaderMetadata, TreeRoute};
 use sp_core::traits::SpawnEssentialNamed;
 use sp_runtime::{
 	generic::BlockId,
@@ -84,7 +86,7 @@ impl<Client, Block> FullChainApi<Client, Block> {
 		let metrics = prometheus.map(ApiMetrics::register).and_then(|r| match r {
 			Err(err) => {
 				log::warn!(
-					target: "txpool",
+					target: LOG_TARGET,
 					"Failed to register transaction pool api prometheus metrics: {:?}",
 					err,
 				);
@@ -111,8 +113,11 @@ impl<Client, Block> FullChainApi<Client, Block> {
 impl<Client, Block> graph::ChainApi for FullChainApi<Client, Block>
 where
 	Block: BlockT,
-	Client:
-		ProvideRuntimeApi<Block> + BlockBackend<Block> + BlockIdTo<Block> + HeaderBackend<Block>,
+	Client: ProvideRuntimeApi<Block>
+		+ BlockBackend<Block>
+		+ BlockIdTo<Block>
+		+ HeaderBackend<Block>
+		+ HeaderMetadata<Block, Error = sp_blockchain::Error>,
 	Client: Send + Sync + 'static,
 	Client::Api: TaggedTransactionQueue<Block>,
 {
@@ -122,8 +127,8 @@ where
 		Pin<Box<dyn Future<Output = error::Result<TransactionValidity>> + Send>>;
 	type BodyFuture = Ready<error::Result<Option<Vec<<Self::Block as BlockT>::Extrinsic>>>>;
 
-	fn block_body(&self, id: &BlockId<Self::Block>) -> Self::BodyFuture {
-		ready(self.client.block_body(&id).map_err(|e| error::Error::from(e)))
+	fn block_body(&self, hash: Block::Hash) -> Self::BodyFuture {
+		ready(self.client.block_body(hash).map_err(error::Error::from))
 	}
 
 	fn validate_transaction(
@@ -134,7 +139,7 @@ where
 	) -> Self::ValidationFuture {
 		let (tx, rx) = oneshot::channel();
 		let client = self.client.clone();
-		let at = at.clone();
+		let at = *at;
 		let validation_pool = self.validation_pool.clone();
 		let metrics = self.metrics.clone();
 
@@ -167,18 +172,14 @@ where
 		&self,
 		at: &BlockId<Self::Block>,
 	) -> error::Result<Option<graph::NumberFor<Self>>> {
-		self.client
-			.to_number(at)
-			.map_err(|e| Error::BlockIdConversion(format!("{:?}", e)))
+		self.client.to_number(at).map_err(|e| Error::BlockIdConversion(e.to_string()))
 	}
 
 	fn block_id_to_hash(
 		&self,
 		at: &BlockId<Self::Block>,
 	) -> error::Result<Option<graph::BlockHash<Self>>> {
-		self.client
-			.to_hash(at)
-			.map_err(|e| Error::BlockIdConversion(format!("{:?}", e)))
+		self.client.to_hash(at).map_err(|e| Error::BlockIdConversion(e.to_string()))
 	}
 
 	fn hash_and_length(
@@ -190,9 +191,17 @@ where
 
 	fn block_header(
 		&self,
-		at: &BlockId<Self::Block>,
+		hash: <Self::Block as BlockT>::Hash,
 	) -> Result<Option<<Self::Block as BlockT>::Header>, Self::Error> {
-		self.client.header(*at).map_err(Into::into)
+		self.client.header(hash).map_err(Into::into)
+	}
+
+	fn tree_route(
+		&self,
+		from: <Self::Block as BlockT>::Hash,
+		to: <Self::Block as BlockT>::Hash,
+	) -> Result<TreeRoute<Self::Block>, Self::Error> {
+		sp_blockchain::tree_route::<Block, Client>(&*self.client, from, to).map_err(Into::into)
 	}
 }
 
@@ -206,8 +215,11 @@ fn validate_transaction_blocking<Client, Block>(
 ) -> error::Result<TransactionValidity>
 where
 	Block: BlockT,
-	Client:
-		ProvideRuntimeApi<Block> + BlockBackend<Block> + BlockIdTo<Block> + HeaderBackend<Block>,
+	Client: ProvideRuntimeApi<Block>
+		+ BlockBackend<Block>
+		+ BlockIdTo<Block>
+		+ HeaderBackend<Block>
+		+ HeaderMetadata<Block, Error = sp_blockchain::Error>,
 	Client: Send + Sync + 'static,
 	Client::Api: TaggedTransactionQueue<Block>,
 {
@@ -216,7 +228,7 @@ where
 		let runtime_api = client.runtime_api();
 		let api_version = sp_tracing::within_span! { sp_tracing::Level::TRACE, "check_version";
 			runtime_api
-				.api_version::<dyn TaggedTransactionQueue<Block>>(&at)
+				.api_version::<dyn TaggedTransactionQueue<Block>>(at)
 				.map_err(|e| Error::RuntimeApi(e.to_string()))?
 				.ok_or_else(|| Error::RuntimeApi(
 					format!("Could not find `TaggedTransactionQueue` api for block `{:?}`.", at)
@@ -224,7 +236,7 @@ where
 		}?;
 
 		let block_hash = client.to_hash(at)
-			.map_err(|e| Error::RuntimeApi(format!("{:?}", e)))?
+			.map_err(|e| Error::RuntimeApi(e.to_string()))?
 			.ok_or_else(|| Error::RuntimeApi(format!("Could not get hash for block `{:?}`.", at)))?;
 
 		use sp_api::Core;
@@ -233,11 +245,11 @@ where
 			sp_tracing::Level::TRACE, "runtime::validate_transaction";
 		{
 			if api_version >= 3 {
-				runtime_api.validate_transaction(&at, source, uxt, block_hash)
+				runtime_api.validate_transaction(at, source, uxt, block_hash)
 					.map_err(|e| Error::RuntimeApi(e.to_string()))
 			} else {
 				let block_number = client.to_number(at)
-					.map_err(|e| Error::RuntimeApi(format!("{:?}", e)))?
+					.map_err(|e| Error::RuntimeApi(e.to_string()))?
 					.ok_or_else(||
 						Error::RuntimeApi(format!("Could not get number for block `{:?}`.", at))
 					)?;
@@ -253,11 +265,11 @@ where
 
 				if api_version == 2 {
 					#[allow(deprecated)] // old validate_transaction
-					runtime_api.validate_transaction_before_version_3(&at, source, uxt)
+					runtime_api.validate_transaction_before_version_3(at, source, uxt)
 						.map_err(|e| Error::RuntimeApi(e.to_string()))
 				} else {
 					#[allow(deprecated)] // old validate_transaction
-					runtime_api.validate_transaction_before_version_2(&at, uxt)
+					runtime_api.validate_transaction_before_version_2(at, uxt)
 						.map_err(|e| Error::RuntimeApi(e.to_string()))
 				}
 			}
@@ -268,8 +280,11 @@ where
 impl<Client, Block> FullChainApi<Client, Block>
 where
 	Block: BlockT,
-	Client:
-		ProvideRuntimeApi<Block> + BlockBackend<Block> + BlockIdTo<Block> + HeaderBackend<Block>,
+	Client: ProvideRuntimeApi<Block>
+		+ BlockBackend<Block>
+		+ BlockIdTo<Block>
+		+ HeaderBackend<Block>
+		+ HeaderMetadata<Block, Error = sp_blockchain::Error>,
 	Client: Send + Sync + 'static,
 	Client::Api: TaggedTransactionQueue<Block>,
 {

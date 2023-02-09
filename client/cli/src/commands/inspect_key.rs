@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2020-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2020-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,13 +21,13 @@ use crate::{
 	utils::{self, print_from_public, print_from_uri},
 	with_crypto_scheme, CryptoSchemeFlag, Error, KeystoreParams, NetworkSchemeFlag, OutputTypeFlag,
 };
+use clap::Parser;
 use sp_core::crypto::{ExposeSecret, SecretString, SecretUri, Ss58Codec};
 use std::str::FromStr;
-use structopt::StructOpt;
 
 /// The `inspect` command
-#[derive(Debug, StructOpt)]
-#[structopt(
+#[derive(Debug, Parser)]
+#[command(
 	name = "inspect",
 	about = "Gets a public key and a SS58 address from the provided Secret URI"
 )]
@@ -44,23 +44,23 @@ pub struct InspectKeyCmd {
 	uri: Option<String>,
 
 	/// Is the given `uri` a hex encoded public key?
-	#[structopt(long)]
+	#[arg(long)]
 	public: bool,
 
 	#[allow(missing_docs)]
-	#[structopt(flatten)]
+	#[clap(flatten)]
 	pub keystore_params: KeystoreParams,
 
 	#[allow(missing_docs)]
-	#[structopt(flatten)]
+	#[clap(flatten)]
 	pub network_scheme: NetworkSchemeFlag,
 
 	#[allow(missing_docs)]
-	#[structopt(flatten)]
+	#[clap(flatten)]
 	pub output_scheme: OutputTypeFlag,
 
 	#[allow(missing_docs)]
-	#[structopt(flatten)]
+	#[clap(flatten)]
 	pub crypto_scheme: CryptoSchemeFlag,
 
 	/// Expect that `--uri` has the given public key/account-id.
@@ -72,7 +72,7 @@ pub struct InspectKeyCmd {
 	///
 	/// If there is no derivation in `--uri`, the public key will be checked against the public key
 	/// of `--uri` directly.
-	#[structopt(long, conflicts_with = "public")]
+	#[arg(long, conflicts_with = "public")]
 	pub expect_public: Option<String>,
 }
 
@@ -87,15 +87,15 @@ impl InspectKeyCmd {
 				self.crypto_scheme.scheme,
 				print_from_public(
 					&uri,
-					self.network_scheme.network.clone(),
-					self.output_scheme.output_type.clone(),
+					self.network_scheme.network,
+					self.output_scheme.output_type,
 				)
 			)?;
 		} else {
 			if let Some(ref expect_public) = self.expect_public {
 				with_crypto_scheme!(
 					self.crypto_scheme.scheme,
-					expect_public_from_phrase(&&expect_public, &uri, password.as_ref(),)
+					expect_public_from_phrase(expect_public, &uri, password.as_ref())
 				)?;
 			}
 
@@ -104,8 +104,8 @@ impl InspectKeyCmd {
 				print_from_uri(
 					&uri,
 					password,
-					self.network_scheme.network.clone(),
-					self.output_scheme.output_type.clone(),
+					self.network_scheme.network,
+					self.output_scheme.output_type,
 				)
 			);
 		}
@@ -127,7 +127,7 @@ fn expect_public_from_phrase<Pair: sp_core::Pair>(
 ) -> Result<(), Error> {
 	let secret_uri = SecretUri::from_str(suri).map_err(|e| format!("{:?}", e))?;
 	let expected_public = if let Some(public) = expect_public.strip_prefix("0x") {
-		let hex_public = hex::decode(&public)
+		let hex_public = array_bytes::hex2bytes(public)
 			.map_err(|_| format!("Invalid expected public key hex: `{}`", expect_public))?;
 		Pair::Public::try_from(&hex_public)
 			.map_err(|_| format!("Invalid expected public key: `{}`", expect_public))?
@@ -158,7 +158,6 @@ mod tests {
 	use super::*;
 	use sp_core::crypto::{ByteArray, Pair};
 	use sp_runtime::traits::IdentifyAccount;
-	use structopt::StructOpt;
 
 	#[test]
 	fn inspect() {
@@ -166,10 +165,10 @@ mod tests {
 			"remember fiber forum demise paper uniform squirrel feel access exclude casual effort";
 		let seed = "0xad1fb77243b536b90cfe5f0d351ab1b1ac40e3890b41dc64f766ee56340cfca5";
 
-		let inspect = InspectKeyCmd::from_iter(&["inspect-key", words, "--password", "12345"]);
+		let inspect = InspectKeyCmd::parse_from(&["inspect-key", words, "--password", "12345"]);
 		assert!(inspect.run().is_ok());
 
-		let inspect = InspectKeyCmd::from_iter(&["inspect-key", seed]);
+		let inspect = InspectKeyCmd::parse_from(&["inspect-key", seed]);
 		assert!(inspect.run().is_ok());
 	}
 
@@ -177,14 +176,14 @@ mod tests {
 	fn inspect_public_key() {
 		let public = "0x12e76e0ae8ce41b6516cce52b3f23a08dcb4cfeed53c6ee8f5eb9f7367341069";
 
-		let inspect = InspectKeyCmd::from_iter(&["inspect-key", "--public", public]);
+		let inspect = InspectKeyCmd::parse_from(&["inspect-key", "--public", public]);
 		assert!(inspect.run().is_ok());
 	}
 
 	#[test]
 	fn inspect_with_expected_public_key() {
 		let check_cmd = |seed, expected_public, success| {
-			let inspect = InspectKeyCmd::from_iter(&[
+			let inspect = InspectKeyCmd::parse_from(&[
 				"inspect-key",
 				"--expect-public",
 				expected_public,
@@ -209,7 +208,7 @@ mod tests {
 			.expect("Valid")
 			.0
 			.public();
-		let valid_public_hex = format!("0x{}", hex::encode(valid_public.as_slice()));
+		let valid_public_hex = array_bytes::bytes2hex("0x", valid_public.as_slice());
 		let valid_accountid = format!("{}", valid_public.into_account());
 
 		// It should fail with the invalid public key
@@ -227,7 +226,7 @@ mod tests {
 				.0
 				.public();
 		let valid_public_hex_with_password =
-			format!("0x{}", hex::encode(&valid_public_with_password.as_slice()));
+			array_bytes::bytes2hex("0x", valid_public_with_password.as_slice());
 		let valid_accountid_with_password =
 			format!("{}", &valid_public_with_password.into_account());
 
@@ -249,7 +248,7 @@ mod tests {
 			.0
 			.public();
 		let valid_public_hex_with_password_and_derivation =
-			format!("0x{}", hex::encode(&valid_public_with_password_and_derivation.as_slice()));
+			array_bytes::bytes2hex("0x", valid_public_with_password_and_derivation.as_slice());
 
 		// They should still be valid, because we check the base secret key.
 		check_cmd(&seed_with_password_and_derivation, &valid_public_hex_with_password, true);

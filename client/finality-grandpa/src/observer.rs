@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2018-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2018-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -43,7 +43,7 @@ use crate::{
 	environment, global_communication,
 	notification::GrandpaJustificationSender,
 	ClientForGrandpa, CommandOrError, CommunicationIn, Config, Error, LinkHalf, VoterCommand,
-	VoterSetState,
+	VoterSetState, LOG_TARGET,
 };
 
 struct ObserverChain<'a, Block: BlockT, Client> {
@@ -63,7 +63,7 @@ where
 		base: Block::Hash,
 		block: Block::Hash,
 	) -> Result<Vec<Block::Hash>, GrandpaError> {
-		environment::ancestry(&self.client, base, block)
+		environment::ancestry(self.client, base, block)
 	}
 }
 
@@ -116,7 +116,7 @@ where
 			Err(e) => return future::err(e.into()),
 		};
 
-		if validation_result.ghost().is_some() {
+		if validation_result.is_valid() {
 			let finalized_hash = commit.target_hash;
 			let finalized_number = commit.target_number;
 
@@ -145,7 +145,7 @@ where
 			// proceed processing with new finalized block number
 			future::ok(finalized_number)
 		} else {
-			debug!(target: "afg", "Received invalid commit: ({:?}, {:?})", round, commit);
+			debug!(target: LOG_TARGET, "Received invalid commit: ({:?}, {:?})", round, commit);
 
 			finality_grandpa::process_commit_validation_result(validation_result, callback);
 
@@ -193,17 +193,17 @@ where
 	);
 
 	let observer_work = ObserverWork::new(
-		client.clone(),
+		client,
 		network,
 		persistent_data,
 		config.keystore,
 		voter_commands_rx,
 		Some(justification_sender),
-		telemetry.clone(),
+		telemetry,
 	);
 
 	let observer_work = observer_work.map_ok(|_| ()).map_err(|e| {
-		warn!("GRANDPA Observer failed: {:?}", e);
+		warn!("GRANDPA Observer failed: {}", e);
 	});
 
 	Ok(observer_work.map(drop))
@@ -289,7 +289,7 @@ where
 				network.note_round(
 					crate::communication::Round(round),
 					crate::communication::SetId(set_id),
-					&*voters,
+					&voters,
 				)
 			}
 		};
@@ -317,7 +317,7 @@ where
 		// update it on-disk in case we restart as validator in the future.
 		self.persistent_data.set_state = match command {
 			VoterCommand::Pause(reason) => {
-				info!(target: "afg", "Pausing old validator set: {}", reason);
+				info!(target: LOG_TARGET, "Pausing old validator set: {}", reason);
 
 				let completed_rounds = self.persistent_data.set_state.read().completed_rounds();
 				let set_state = VoterSetState::Paused { completed_rounds };
@@ -437,7 +437,7 @@ mod tests {
 			aux_schema::load_persistent(&*backend, client.info().genesis_hash, 0, || Ok(voters))
 				.unwrap();
 
-		let (_tx, voter_command_rx) = tracing_unbounded("");
+		let (_tx, voter_command_rx) = tracing_unbounded("test_mpsc_voter_command", 100_000);
 
 		let observer = ObserverWork::new(
 			client,

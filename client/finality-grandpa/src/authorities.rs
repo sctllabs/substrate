@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2018-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2018-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -21,7 +21,7 @@
 use std::{cmp::Ord, fmt::Debug, ops::Add};
 
 use finality_grandpa::voter_set::VoterSet;
-use fork_tree::ForkTree;
+use fork_tree::{FilterAction, ForkTree};
 use log::debug;
 use parity_scale_codec::{Decode, Encode};
 use parking_lot::MappedMutexGuard;
@@ -29,26 +29,25 @@ use sc_consensus::shared_data::{SharedData, SharedDataLocked};
 use sc_telemetry::{telemetry, TelemetryHandle, CONSENSUS_INFO};
 use sp_finality_grandpa::{AuthorityId, AuthorityList};
 
-use crate::SetId;
+use crate::{SetId, LOG_TARGET};
 
 /// Error type returned on operations on the `AuthoritySet`.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error<N, E> {
-	#[display(fmt = "Invalid authority set, either empty or with an authority weight set to 0.")]
+	#[error("Invalid authority set, either empty or with an authority weight set to 0.")]
 	InvalidAuthoritySet,
-	#[display(fmt = "Client error during ancestry lookup: {}", _0)]
+	#[error("Client error during ancestry lookup: {0}")]
 	Client(E),
-	#[display(fmt = "Duplicate authority set change.")]
+	#[error("Duplicate authority set change.")]
 	DuplicateAuthoritySetChange,
-	#[display(fmt = "Multiple pending forced authority set changes are not allowed.")]
+	#[error("Multiple pending forced authority set changes are not allowed.")]
 	MultiplePendingForcedAuthoritySetChanges,
-	#[display(
-		fmt = "A pending forced authority set change could not be applied since it must be applied \
-		after the pending standard change at #{}",
-		_0
+	#[error(
+		"A pending forced authority set change could not be applied since it must be applied \
+		after the pending standard change at #{0}"
 	)]
 	ForcedAuthoritySetChangeDependencyUnsatisfied(N),
-	#[display(fmt = "Invalid operation in the pending changes tree: {}", _0)]
+	#[error("Invalid operation in the pending changes tree: {0}")]
 	ForkTree(fork_tree::Error<E>),
 }
 
@@ -221,6 +220,37 @@ where
 	pub(crate) fn current(&self) -> (u64, &[(AuthorityId, u64)]) {
 		(self.set_id, &self.current_authorities[..])
 	}
+
+	/// Revert to a specified block given its `hash` and `number`.
+	/// This removes all the authority set changes that were announced after
+	/// the revert point.
+	/// Revert point is identified by `number` and `hash`.
+	pub(crate) fn revert<F, E>(&mut self, hash: H, number: N, is_descendent_of: &F)
+	where
+		F: Fn(&H, &H) -> Result<bool, E>,
+	{
+		let filter = |node_hash: &H, node_num: &N, _: &PendingChange<H, N>| {
+			if number >= *node_num &&
+				(is_descendent_of(node_hash, &hash).unwrap_or_default() || *node_hash == hash)
+			{
+				// Continue the search in this subtree.
+				FilterAction::KeepNode
+			} else if number < *node_num && is_descendent_of(&hash, node_hash).unwrap_or_default() {
+				// Found a node to be removed.
+				FilterAction::Remove
+			} else {
+				// Not a parent or child of the one we're looking for, stop processing this branch.
+				FilterAction::KeepTree
+			}
+		};
+
+		// Remove standard changes.
+		let _ = self.pending_standard_changes.drain_filter(&filter);
+
+		// Remove forced changes.
+		self.pending_forced_changes
+			.retain(|change| !is_descendent_of(&hash, &change.canon_hash).unwrap_or_default());
+	}
 }
 
 impl<H: Eq, N> AuthoritySet<H, N>
@@ -284,7 +314,7 @@ where
 		let number = pending.canon_height.clone();
 
 		debug!(
-			target: "afg",
+			target: LOG_TARGET,
 			"Inserting potential standard set change signaled at block {:?} (delayed by {:?} blocks).",
 			(&number, &hash),
 			pending.delay,
@@ -293,7 +323,7 @@ where
 		self.pending_standard_changes.import(hash, number, pending, is_descendent_of)?;
 
 		debug!(
-			target: "afg",
+			target: LOG_TARGET,
 			"There are now {} alternatives for the next pending standard change (roots), and a \
 			 total of {} pending standard changes (across all forks).",
 			self.pending_standard_changes.roots().count(),
@@ -332,7 +362,7 @@ where
 			.unwrap_or_else(|i| i);
 
 		debug!(
-			target: "afg",
+			target: LOG_TARGET,
 			"Inserting potential forced set change at block {:?} (delayed by {:?} blocks).",
 			(&pending.canon_height, &pending.canon_hash),
 			pending.delay,
@@ -340,7 +370,11 @@ where
 
 		self.pending_forced_changes.insert(idx, pending);
 
-		debug!(target: "afg", "There are now {} pending forced changes.", self.pending_forced_changes.len());
+		debug!(
+			target: LOG_TARGET,
+			"There are now {} pending forced changes.",
+			self.pending_forced_changes.len()
+		);
 
 		Ok(())
 	}
@@ -445,7 +479,7 @@ where
 					if standard_change.effective_number() <= median_last_finalized &&
 						is_descendent_of(&standard_change.canon_hash, &change.canon_hash)?
 					{
-						log::info!(target: "afg",
+						log::info!(target: LOG_TARGET,
 							"Not applying authority set change forced at block #{:?}, due to pending standard change at block #{:?}",
 							change.canon_height,
 							standard_change.effective_number(),
@@ -458,7 +492,7 @@ where
 				}
 
 				// apply this change: make the set canonical
-				afg_log!(
+				grandpa_log!(
 					initial_sync,
 					"👴 Applying authority set change forced at block #{:?}",
 					change.canon_height,
@@ -527,8 +561,7 @@ where
 			fork_tree::FinalizationResult::Changed(change) => {
 				status.changed = true;
 
-				let pending_forced_changes =
-					std::mem::replace(&mut self.pending_forced_changes, Vec::new());
+				let pending_forced_changes = std::mem::take(&mut self.pending_forced_changes);
 
 				// we will keep all forced changes for any later blocks and that are a
 				// descendent of the finalized block (i.e. they are part of this branch).
@@ -541,7 +574,7 @@ where
 				}
 
 				if let Some(change) = change {
-					afg_log!(
+					grandpa_log!(
 						initial_sync,
 						"👴 Applying authority set change scheduled at block #{:?}",
 						change.canon_height,

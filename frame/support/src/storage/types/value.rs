@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -142,6 +142,18 @@ where
 		<Self as crate::storage::StorageValue<Value>>::try_mutate(f)
 	}
 
+	/// Mutate the value. Deletes the item if mutated to a `None`.
+	pub fn mutate_exists<R, F: FnOnce(&mut Option<Value>) -> R>(f: F) -> R {
+		<Self as crate::storage::StorageValue<Value>>::mutate_exists(f)
+	}
+
+	/// Mutate the value if closure returns `Ok`. Deletes the item if mutated to a `None`.
+	pub fn try_mutate_exists<R, E, F: FnOnce(&mut Option<Value>) -> Result<R, E>>(
+		f: F,
+	) -> Result<R, E> {
+		<Self as crate::storage::StorageValue<Value>>::try_mutate_exists(f)
+	}
+
 	/// Clear the storage value.
 	pub fn kill() {
 		<Self as crate::storage::StorageValue<Value>>::kill()
@@ -210,6 +222,8 @@ where
 	OnEmpty: crate::traits::Get<QueryKind::Query> + 'static,
 {
 	fn build_metadata(docs: Vec<&'static str>, entries: &mut Vec<StorageEntryMetadata>) {
+		let docs = if cfg!(feature = "no-metadata-docs") { vec![] } else { docs };
+
 		let entry = StorageEntryMetadata {
 			name: Prefix::STORAGE_PREFIX,
 			modifier: QueryKind::METADATA,

@@ -23,7 +23,7 @@ use crate::{
 	BlockNumberOps, GrandpaJustification, SharedAuthoritySet,
 };
 use sc_client_api::Backend as ClientBackend;
-use sc_network::warp_request_handler::{EncodedProof, VerificationResult, WarpSyncProvider};
+use sc_network_common::sync::warp::{EncodedProof, VerificationResult, WarpSyncProvider};
 use sp_blockchain::{Backend as BlockchainBackend, HeaderBackend};
 use sp_finality_grandpa::{AuthorityList, SetId, GRANDPA_ENGINE_ID};
 use sp_runtime::{
@@ -34,25 +34,24 @@ use sp_runtime::{
 use std::{collections::HashMap, sync::Arc};
 
 /// Warp proof processing error.
-#[derive(Debug, derive_more::Display, derive_more::From)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
 	/// Decoding error.
-	#[display(fmt = "Failed to decode block hash: {}.", _0)]
-	DecodeScale(codec::Error),
+	#[error("Failed to decode block hash: {0}.")]
+	DecodeScale(#[from] codec::Error),
 	/// Client backend error.
-	Client(sp_blockchain::Error),
+	#[error("{0}")]
+	Client(#[from] sp_blockchain::Error),
 	/// Invalid request data.
-	#[from(ignore)]
+	#[error("{0}")]
 	InvalidRequest(String),
 	/// Invalid warp proof.
-	#[from(ignore)]
+	#[error("{0}")]
 	InvalidProof(String),
 	/// Missing header or authority set change data.
-	#[display(fmt = "Missing required data to be able to answer request.")]
+	#[error("Missing required data to be able to answer request.")]
 	MissingData,
 }
-
-impl std::error::Error for Error {}
 
 /// The maximum size in bytes of the `WarpSyncProof`.
 pub(super) const MAX_WARP_SYNC_PROOF_SIZE: usize = 8 * 1024 * 1024;
@@ -117,9 +116,12 @@ impl<Block: BlockT> WarpSyncProof<Block> {
 		let set_changes = set_changes.iter_from(begin_number).ok_or(Error::MissingData)?;
 
 		for (_, last_block) in set_changes {
-			let header = blockchain.header(BlockId::Number(*last_block))?.expect(
-				"header number comes from previously applied set changes; must exist in db; qed.",
-			);
+			let hash = blockchain.block_hash_from_id(&BlockId::Number(*last_block))?
+				.expect("header number comes from previously applied set changes; corresponding hash must exist in db; qed.");
+
+			let header = blockchain
+				.header(hash)?
+				.expect("header hash obtained from header number exists in db; corresponding header must exist in db too; qed.");
 
 			// the last block in a set is the one that triggers a change to the next set,
 			// therefore the block must have a digest that signals the authority set change
@@ -131,13 +133,9 @@ impl<Block: BlockT> WarpSyncProof<Block> {
 			}
 
 			let justification = blockchain
-				.justifications(BlockId::Number(*last_block))?
+				.justifications(header.hash())?
 				.and_then(|just| just.into_justification(GRANDPA_ENGINE_ID))
-				.expect(
-					"header is last in set and contains standard change signal; \
-					must have justification; \
-					qed.",
-				);
+				.ok_or_else(|| Error::MissingData)?;
 
 			let justification = GrandpaJustification::<Block>::decode(&mut &justification[..])?;
 
@@ -173,7 +171,7 @@ impl<Block: BlockT> WarpSyncProof<Block> {
 			});
 
 			if let Some(latest_justification) = latest_justification {
-				let header = blockchain.header(BlockId::Hash(latest_justification.target().1))?
+				let header = blockchain.header(latest_justification.target().1)?
 					.expect("header hash corresponds to a justification in db; must exist in db as well; qed.");
 
 				proofs.push(WarpSyncFragment { header, justification: latest_justification })
@@ -206,7 +204,7 @@ impl<Block: BlockT> WarpSyncProof<Block> {
 			let hash = proof.header.hash();
 			let number = *proof.header.number();
 
-			if let Some((set_id, list)) = hard_forks.get(&(hash.clone(), number)) {
+			if let Some((set_id, list)) = hard_forks.get(&(hash, number)) {
 				current_set_id = *set_id;
 				current_authorities = list.clone();
 			} else {
@@ -328,7 +326,7 @@ mod tests {
 	use sp_consensus::BlockOrigin;
 	use sp_finality_grandpa::GRANDPA_ENGINE_ID;
 	use sp_keyring::Ed25519Keyring;
-	use sp_runtime::{generic::BlockId, traits::Header as _};
+	use sp_runtime::traits::Header as _;
 	use std::sync::Arc;
 	use substrate_test_runtime_client::{
 		ClientBlockImportExt, ClientExt, DefaultTestClientBuilderExt, TestClientBuilder,
@@ -413,10 +411,7 @@ mod tests {
 				let justification = GrandpaJustification::from_commit(&client, 42, commit).unwrap();
 
 				client
-					.finalize_block(
-						BlockId::Hash(target_hash),
-						Some((GRANDPA_ENGINE_ID, justification.encode())),
-					)
+					.finalize_block(target_hash, Some((GRANDPA_ENGINE_ID, justification.encode())))
 					.unwrap();
 
 				authority_set_changes.push((current_set_id, n));

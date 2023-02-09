@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2021-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -18,11 +18,6 @@
 
 //! Tests that are only relevant for Linux.
 
-// Constrain this only to wasmtime for the time being. Without this rustc will complain on unused
-// imports and items. The alternative is to plop `cfg(feature = wasmtime)` everywhere which seems
-// borthersome.
-#![cfg(feature = "wasmtime")]
-
 use super::mk_test_runtime;
 use crate::WasmExecutionMethod;
 use codec::Encode as _;
@@ -38,7 +33,13 @@ fn memory_consumption_compiled() {
 	// For that we make a series of runtime calls, probing the RSS for the VMA matching the linear
 	// memory. After the call we expect RSS to be equal to 0.
 
-	let runtime = mk_test_runtime(WasmExecutionMethod::Compiled, 1024);
+	let runtime = mk_test_runtime(
+		WasmExecutionMethod::Compiled {
+			instantiation_strategy:
+				sc_executor_wasmtime::InstantiationStrategy::LegacyInstanceReuse,
+		},
+		1024,
+	);
 
 	let mut instance = runtime.new_instance().unwrap();
 	let heap_base = instance

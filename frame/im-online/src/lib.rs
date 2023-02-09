@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -104,7 +104,7 @@ use sp_staking::{
 	offence::{Kind, Offence, ReportOffence},
 	SessionIndex,
 };
-use sp_std::{convert::TryInto, prelude::*};
+use sp_std::prelude::*;
 pub use weights::WeightInfo;
 
 pub mod sr25519 {
@@ -238,8 +238,7 @@ where
 /// `MultiAddrEncodingLimit` represents the size limit of the encoding of `MultiAddr`
 /// `AddressesLimit` represents the size limit of the vector of peers connected
 #[derive(Clone, Eq, PartialEq, Encode, Decode, MaxEncodedLen, TypeInfo)]
-#[codec(mel_bound(PeerIdEncodingLimit: Get<u32>,
-  	MultiAddrEncodingLimit: Get<u32>, AddressesLimit: Get<u32>))]
+#[codec(mel_bound())]
 #[scale_info(skip_type_params(PeerIdEncodingLimit, MultiAddrEncodingLimit, AddressesLimit))]
 pub struct BoundedOpaqueNetworkState<PeerIdEncodingLimit, MultiAddrEncodingLimit, AddressesLimit>
 where
@@ -315,7 +314,6 @@ pub mod pallet {
 
 	#[pallet::pallet]
 	#[pallet::generate_store(pub(super) trait Store)]
-	#[pallet::generate_storage_info]
 	pub struct Pallet<T>(_);
 
 	#[pallet::config]
@@ -339,7 +337,7 @@ pub mod pallet {
 		type MaxPeerDataEncodingSize: Get<u32>;
 
 		/// The overarching event type.
-		type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
+		type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
 
 		/// A type for retrieving the validators supposed to be online in a session.
 		type ValidatorSet: ValidatorSetWithIdentification<Self::AccountId>;
@@ -476,6 +474,7 @@ pub mod pallet {
 		/// # </weight>
 		// NOTE: the weight includes the cost of validate_unsigned as it is part of the cost to
 		// import block with such an extrinsic.
+		#[pallet::call_index(0)]
 		#[pallet::weight(<T as Config>::WeightInfo::validate_unsigned_and_then_heartbeat(
 			heartbeat.validators_len as u32,
 			heartbeat.network_state.external_addresses.len() as u32,
@@ -510,9 +509,9 @@ pub mod pallet {
 
 				Ok(())
 			} else if exists {
-				Err(Error::<T>::DuplicatedHeartbeat)?
+				Err(Error::<T>::DuplicatedHeartbeat.into())
 			} else {
-				Err(Error::<T>::InvalidKey)?
+				Err(Error::<T>::InvalidKey.into())
 			}
 		}
 	}
@@ -575,7 +574,7 @@ pub mod pallet {
 
 				// check signature (this is expensive so we do it last).
 				let signature_valid = heartbeat.using_encoded(|encoded_heartbeat| {
-					authority_id.verify(&encoded_heartbeat, &signature)
+					authority_id.verify(&encoded_heartbeat, signature)
 				});
 
 				if !signature_valid {
@@ -606,10 +605,6 @@ impl<T: Config + pallet_authorship::Config>
 	pallet_authorship::EventHandler<ValidatorId<T>, T::BlockNumber> for Pallet<T>
 {
 	fn note_author(author: ValidatorId<T>) {
-		Self::note_authorship(author);
-	}
-
-	fn note_uncle(author: ValidatorId<T>, _age: T::BlockNumber) {
 		Self::note_authorship(author);
 	}
 }
@@ -902,7 +897,9 @@ impl<T: Config> OneSessionHandler<T::AccountId> for Pallet<T> {
 		// Remove all received heartbeats and number of authored blocks from the
 		// current session, they have already been processed and won't be needed
 		// anymore.
+		#[allow(deprecated)]
 		ReceivedHeartbeats::<T>::remove_prefix(&T::ValidatorSet::session_index(), None);
+		#[allow(deprecated)]
 		AuthoredBlocks::<T>::remove_prefix(&T::ValidatorSet::session_index(), None);
 
 		if offenders.is_empty() {
@@ -958,12 +955,12 @@ impl<Offender: Clone> Offence<Offender> for UnresponsivenessOffence<Offender> {
 		self.session_index
 	}
 
-	fn slash_fraction(offenders: u32, validator_set_count: u32) -> Perbill {
+	fn slash_fraction(&self, offenders: u32) -> Perbill {
 		// the formula is min((3 * (k - (n / 10 + 1))) / n, 1) * 0.07
 		// basically, 10% can be offline with no slash, but after that, it linearly climbs up to 7%
 		// when 13/30 are offline (around 5% when 1/3 are offline).
-		if let Some(threshold) = offenders.checked_sub(validator_set_count / 10 + 1) {
-			let x = Perbill::from_rational(3 * threshold, validator_set_count);
+		if let Some(threshold) = offenders.checked_sub(self.validator_set_count / 10 + 1) {
+			let x = Perbill::from_rational(3 * threshold, self.validator_set_count);
 			x.saturating_mul(Perbill::from_percent(7))
 		} else {
 			Perbill::default()

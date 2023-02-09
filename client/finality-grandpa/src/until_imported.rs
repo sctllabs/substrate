@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -24,7 +24,7 @@
 
 use super::{
 	BlockStatus as BlockStatusT, BlockSyncRequester as BlockSyncRequesterT, CommunicationIn, Error,
-	SignedMessage,
+	SignedMessage, LOG_TARGET,
 };
 
 use finality_grandpa::voter;
@@ -296,7 +296,7 @@ where
 					let next_log = *last_log + LOG_PENDING_INTERVAL;
 					if Instant::now() >= next_log {
 						debug!(
-							target: "afg",
+							target: LOG_TARGET,
 							"Waiting to import block {} before {} {} messages can be imported. \
 							Requesting network sync service to retrieve block from. \
 							Possible fork?",
@@ -346,7 +346,7 @@ where
 
 fn warn_authority_wrong_target<H: ::std::fmt::Display>(hash: H, id: AuthorityId) {
 	warn!(
-		target: "afg",
+		target: LOG_TARGET,
 		"Authority {:?} signed GRANDPA message with \
 		wrong block number for hash {}",
 		id,
@@ -354,7 +354,7 @@ fn warn_authority_wrong_target<H: ::std::fmt::Display>(hash: H, id: AuthorityId)
 	);
 }
 
-impl<Block: BlockT> BlockUntilImported<Block> for SignedMessage<Block> {
+impl<Block: BlockT> BlockUntilImported<Block> for SignedMessage<Block::Header> {
 	type Blocked = Self;
 
 	fn needs_waiting<BlockStatus: BlockStatusT<Block>>(
@@ -389,8 +389,13 @@ impl<Block: BlockT> BlockUntilImported<Block> for SignedMessage<Block> {
 
 /// Helper type definition for the stream which waits until vote targets for
 /// signed messages are imported.
-pub(crate) type UntilVoteTargetImported<Block, BlockStatus, BlockSyncRequester, I> =
-	UntilImported<Block, BlockStatus, BlockSyncRequester, I, SignedMessage<Block>>;
+pub(crate) type UntilVoteTargetImported<Block, BlockStatus, BlockSyncRequester, I> = UntilImported<
+	Block,
+	BlockStatus,
+	BlockSyncRequester,
+	I,
+	SignedMessage<<Block as BlockT>::Header>,
+>;
 
 /// This blocks a global message import, i.e. a commit or catch up messages,
 /// until all blocks referenced in its votes are known.
@@ -574,7 +579,7 @@ mod tests {
 
 	impl TestChainState {
 		fn new() -> (Self, ImportNotifications<Block>) {
-			let (tx, rx) = tracing_unbounded("test");
+			let (tx, rx) = tracing_unbounded("test", 100_000);
 			let state =
 				TestChainState { sender: tx, known_blocks: Arc::new(Mutex::new(HashMap::new())) };
 
@@ -587,17 +592,18 @@ mod tests {
 
 		fn import_header(&self, header: Header) {
 			let hash = header.hash();
-			let number = header.number().clone();
-
+			let number = *header.number();
+			let (tx, _rx) = tracing_unbounded("unpin-worker-channel", 10_000);
 			self.known_blocks.lock().insert(hash, number);
 			self.sender
-				.unbounded_send(BlockImportNotification {
+				.unbounded_send(BlockImportNotification::<Block>::new(
 					hash,
-					origin: BlockOrigin::File,
+					BlockOrigin::File,
 					header,
-					is_new_best: false,
-					tree_route: None,
-				})
+					false,
+					None,
+					tx,
+				))
 				.unwrap();
 		}
 	}
@@ -608,7 +614,7 @@ mod tests {
 
 	impl BlockStatusT<Block> for TestBlockStatus {
 		fn block_number(&self, hash: Hash) -> Result<Option<u64>, Error> {
-			Ok(self.inner.lock().get(&hash).map(|x| x.clone()))
+			Ok(self.inner.lock().get(&hash).map(|x| *x))
 		}
 	}
 
@@ -646,7 +652,7 @@ mod tests {
 
 	// unwrap the commit from `CommunicationIn` returning its fields in a tuple,
 	// panics if the given message isn't a commit
-	fn unapply_commit(msg: CommunicationIn<Block>) -> (u64, CompactCommit<Block>) {
+	fn unapply_commit(msg: CommunicationIn<Block>) -> (u64, CompactCommit<Header>) {
 		match msg {
 			voter::CommunicationIn::Commit(round, commit, ..) => (round, commit),
 			_ => panic!("expected commit"),
@@ -655,7 +661,7 @@ mod tests {
 
 	// unwrap the catch up from `CommunicationIn` returning its inner representation,
 	// panics if the given message isn't a catch up
-	fn unapply_catch_up(msg: CommunicationIn<Block>) -> CatchUp<Block> {
+	fn unapply_catch_up(msg: CommunicationIn<Block>) -> CatchUp<Header> {
 		match msg {
 			voter::CommunicationIn::CatchUp(catch_up, ..) => catch_up,
 			_ => panic!("expected catch up"),
@@ -675,7 +681,7 @@ mod tests {
 		// enact all dependencies before importing the message
 		enact_dependencies(&chain_state);
 
-		let (global_tx, global_rx) = tracing_unbounded("test");
+		let (global_tx, global_rx) = tracing_unbounded("test", 100_000);
 
 		let until_imported = UntilGlobalMessageBlocksImported::new(
 			import_notifications,
@@ -703,7 +709,7 @@ mod tests {
 		let (chain_state, import_notifications) = TestChainState::new();
 		let block_status = chain_state.block_status();
 
-		let (global_tx, global_rx) = tracing_unbounded("test");
+		let (global_tx, global_rx) = tracing_unbounded("test", 100_000);
 
 		let until_imported = UntilGlobalMessageBlocksImported::new(
 			import_notifications,
@@ -740,7 +746,7 @@ mod tests {
 		let h2 = make_header(6);
 		let h3 = make_header(7);
 
-		let unknown_commit = CompactCommit::<Block> {
+		let unknown_commit = CompactCommit::<Header> {
 			target_hash: h1.hash(),
 			target_number: 5,
 			precommits: vec![
@@ -768,7 +774,7 @@ mod tests {
 		let h2 = make_header(6);
 		let h3 = make_header(7);
 
-		let known_commit = CompactCommit::<Block> {
+		let known_commit = CompactCommit::<Header> {
 			target_hash: h1.hash(),
 			target_number: 5,
 			precommits: vec![
@@ -891,7 +897,7 @@ mod tests {
 		let (chain_state, import_notifications) = TestChainState::new();
 		let block_status = chain_state.block_status();
 
-		let (global_tx, global_rx) = tracing_unbounded("test");
+		let (global_tx, global_rx) = tracing_unbounded("test", 100_000);
 
 		let block_sync_requester = TestBlockSyncRequester::default();
 
@@ -910,7 +916,7 @@ mod tests {
 
 		// we create a commit message, with precommits for blocks 6 and 7 which
 		// we haven't imported.
-		let unknown_commit = CompactCommit::<Block> {
+		let unknown_commit = CompactCommit::<Header> {
 			target_hash: h1.hash(),
 			target_number: 5,
 			precommits: vec![

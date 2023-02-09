@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -38,7 +38,7 @@ use crate::{
 		CompletedRound, CompletedRounds, CurrentRounds, HasVoted, SharedVoterSetState,
 		VoterSetState,
 	},
-	GrandpaJustification, NewAuthoritySet,
+	GrandpaJustification, NewAuthoritySet, LOG_TARGET,
 };
 
 const VERSION_KEY: &[u8] = b"grandpa_schema_version";
@@ -100,8 +100,8 @@ where
 				// previously we only supported at most one pending change per fork
 				&|_, _| Ok(false),
 			) {
-				warn!(target: "afg", "Error migrating pending authority set change: {:?}.", err);
-				warn!(target: "afg", "Node is in a potentially inconsistent state.");
+				warn!(target: LOG_TARGET, "Error migrating pending authority set change: {}", err);
+				warn!(target: LOG_TARGET, "Node is in a potentially inconsistent state.");
 			}
 		}
 
@@ -191,7 +191,7 @@ where
 			"state is for completed round; completed rounds must have a prevote ghost; qed.",
 		);
 
-		let mut current_rounds = CurrentRounds::new();
+		let mut current_rounds = CurrentRounds::<Block>::new();
 		current_rounds.insert(last_round_number + 1, HasVoted::No);
 
 		let set_state = VoterSetState::Live {
@@ -255,7 +255,7 @@ where
 				let base = set_state.prevote_ghost
 					.expect("state is for completed round; completed rounds must have a prevote ghost; qed.");
 
-				let mut current_rounds = CurrentRounds::new();
+				let mut current_rounds = CurrentRounds::<Block>::new();
 				current_rounds.insert(last_round_number + 1, HasVoted::No);
 
 				VoterSetState::Live {
@@ -384,8 +384,11 @@ where
 	}
 
 	// genesis.
-	info!(target: "afg", "👴 Loading GRANDPA authority set \
-		from genesis on what appears to be first startup.");
+	info!(
+		target: LOG_TARGET,
+		"👴 Loading GRANDPA authority set \
+		from genesis on what appears to be first startup."
+	);
 
 	let genesis_authorities = genesis_authorities()?;
 	let genesis_set = AuthoritySet::genesis(genesis_authorities)
@@ -430,7 +433,7 @@ where
 		// reset.
 		let set_state = VoterSetState::<Block>::live(
 			new_set.set_id,
-			&set,
+			set,
 			(new_set.canon_hash, new_set.canon_number),
 		);
 		let encoded = set_state.encode();
@@ -500,7 +503,7 @@ mod test {
 	use super::*;
 	use sp_core::{crypto::UncheckedFrom, H256};
 	use sp_finality_grandpa::AuthorityId;
-	use substrate_test_runtime_client;
+	use substrate_test_runtime_client::{self, runtime::Block};
 
 	fn dummy_id() -> AuthorityId {
 		AuthorityId::unchecked_from([1; 32])
@@ -574,7 +577,7 @@ mod test {
 			.unwrap(),
 		);
 
-		let mut current_rounds = CurrentRounds::new();
+		let mut current_rounds = CurrentRounds::<Block>::new();
 		current_rounds.insert(round_number + 1, HasVoted::No);
 
 		assert_eq!(
@@ -667,7 +670,7 @@ mod test {
 			.unwrap(),
 		);
 
-		let mut current_rounds = CurrentRounds::new();
+		let mut current_rounds = CurrentRounds::<Block>::new();
 		current_rounds.insert(round_number + 1, HasVoted::No);
 
 		assert_eq!(

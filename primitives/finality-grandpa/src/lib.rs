@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2018-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2018-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -29,11 +29,16 @@ use codec::{Codec, Decode, Encode, Input};
 use scale_info::TypeInfo;
 #[cfg(feature = "std")]
 use sp_keystore::{SyncCryptoStore, SyncCryptoStorePtr};
-use sp_runtime::{traits::NumberFor, ConsensusEngineId, RuntimeDebug};
+use sp_runtime::{
+	traits::{Header as HeaderT, NumberFor},
+	ConsensusEngineId, RuntimeDebug,
+};
 use sp_std::{borrow::Cow, vec::Vec};
 
-#[cfg(feature = "std")]
-use log::debug;
+/// The log target to be used by client code.
+pub const CLIENT_LOG_TARGET: &str = "grandpa";
+/// The log target to be used by runtime code.
+pub const RUNTIME_LOG_TARGET: &str = "runtime::grandpa";
 
 /// Key type for GRANDPA module.
 pub const KEY_TYPE: sp_core::crypto::KeyTypeId = sp_application_crypto::key_types::GRANDPA;
@@ -59,7 +64,7 @@ pub const GRANDPA_ENGINE_ID: ConsensusEngineId = *b"FRNK";
 
 /// The storage key for the current set of weighted Grandpa authorities.
 /// The value stored is an encoded VersionedAuthorityList.
-pub const GRANDPA_AUTHORITIES_KEY: &'static [u8] = b":grandpa_authorities";
+pub const GRANDPA_AUTHORITIES_KEY: &[u8] = b":grandpa_authorities";
 
 /// The weight of an authority.
 pub type AuthorityWeight = u64;
@@ -76,9 +81,67 @@ pub type RoundNumber = u64;
 /// A list of Grandpa authorities with associated weights.
 pub type AuthorityList = Vec<(AuthorityId, AuthorityWeight)>;
 
+/// A GRANDPA message for a substrate chain.
+pub type Message<Header> = grandpa::Message<<Header as HeaderT>::Hash, <Header as HeaderT>::Number>;
+
+/// A signed message.
+pub type SignedMessage<Header> = grandpa::SignedMessage<
+	<Header as HeaderT>::Hash,
+	<Header as HeaderT>::Number,
+	AuthoritySignature,
+	AuthorityId,
+>;
+
+/// A primary propose message for this chain's block type.
+pub type PrimaryPropose<Header> =
+	grandpa::PrimaryPropose<<Header as HeaderT>::Hash, <Header as HeaderT>::Number>;
+/// A prevote message for this chain's block type.
+pub type Prevote<Header> = grandpa::Prevote<<Header as HeaderT>::Hash, <Header as HeaderT>::Number>;
+/// A precommit message for this chain's block type.
+pub type Precommit<Header> =
+	grandpa::Precommit<<Header as HeaderT>::Hash, <Header as HeaderT>::Number>;
+/// A catch up message for this chain's block type.
+pub type CatchUp<Header> = grandpa::CatchUp<
+	<Header as HeaderT>::Hash,
+	<Header as HeaderT>::Number,
+	AuthoritySignature,
+	AuthorityId,
+>;
+/// A commit message for this chain's block type.
+pub type Commit<Header> = grandpa::Commit<
+	<Header as HeaderT>::Hash,
+	<Header as HeaderT>::Number,
+	AuthoritySignature,
+	AuthorityId,
+>;
+
+/// A compact commit message for this chain's block type.
+pub type CompactCommit<Header> = grandpa::CompactCommit<
+	<Header as HeaderT>::Hash,
+	<Header as HeaderT>::Number,
+	AuthoritySignature,
+	AuthorityId,
+>;
+
+/// A GRANDPA justification for block finality, it includes a commit message and
+/// an ancestry proof including all headers routing all precommit target blocks
+/// to the commit target block. Due to the current voting strategy the precommit
+/// targets should be the same as the commit target, since honest voters don't
+/// vote past authority set change blocks.
+///
+/// This is meant to be stored in the db and passed around the network to other
+/// nodes, and are used by syncing nodes to prove authority set handoffs.
+#[derive(Clone, Encode, Decode, PartialEq, Eq, TypeInfo)]
+#[cfg_attr(feature = "std", derive(Debug))]
+pub struct GrandpaJustification<Header: HeaderT> {
+	pub round: u64,
+	pub commit: Commit<Header>,
+	pub votes_ancestries: Vec<Header>,
+}
+
 /// A scheduled change of authority set.
 #[cfg_attr(feature = "std", derive(Serialize))]
-#[derive(Clone, Eq, PartialEq, Encode, Decode, RuntimeDebug)]
+#[derive(Clone, Eq, PartialEq, Encode, Decode, RuntimeDebug, TypeInfo)]
 pub struct ScheduledChange<N> {
 	/// The new authorities after the change, along with their respective weights.
 	pub next_authorities: AuthorityList,
@@ -367,8 +430,9 @@ where
 	let valid = id.verify(&buf, signature);
 
 	if !valid {
-		#[cfg(feature = "std")]
-		debug!(target: "afg", "Bad signature on message from {:?}", id);
+		let log_target = if cfg!(feature = "std") { CLIENT_LOG_TARGET } else { RUNTIME_LOG_TARGET };
+
+		log::debug!(target: log_target, "Bad signature on message from {:?}", id);
 	}
 
 	valid
@@ -465,7 +529,7 @@ impl<'a> Decode for VersionedAuthorityList<'a> {
 /// the runtime API boundary this type is unknown and as such we keep this
 /// opaque representation, implementors of the runtime API will have to make
 /// sure that all usages of `OpaqueKeyOwnershipProof` refer to the same type.
-#[derive(Decode, Encode, PartialEq)]
+#[derive(Decode, Encode, PartialEq, TypeInfo)]
 pub struct OpaqueKeyOwnershipProof(Vec<u8>);
 
 impl OpaqueKeyOwnershipProof {

@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2021-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -30,10 +30,12 @@ pub(crate) struct Metrics {
 	pub beefy_round_concluded: Gauge<U64>,
 	/// Best block finalized by BEEFY
 	pub beefy_best_block: Gauge<U64>,
+	/// Best block BEEFY voted on
+	pub beefy_best_voted: Gauge<U64>,
 	/// Next block BEEFY should vote on
 	pub beefy_should_vote_on: Gauge<U64>,
-	/// Number of sessions without a signed commitment
-	pub beefy_skipped_sessions: Counter<U64>,
+	/// Number of sessions with lagging signed commitment on mandatory block
+	pub beefy_lagging_sessions: Counter<U64>,
 }
 
 impl Metrics {
@@ -61,14 +63,18 @@ impl Metrics {
 				Gauge::new("substrate_beefy_best_block", "Best block finalized by BEEFY")?,
 				registry,
 			)?,
+			beefy_best_voted: register(
+				Gauge::new("substrate_beefy_best_voted", "Best block voted on by BEEFY")?,
+				registry,
+			)?,
 			beefy_should_vote_on: register(
 				Gauge::new("substrate_beefy_should_vote_on", "Next block, BEEFY should vote on")?,
 				registry,
 			)?,
-			beefy_skipped_sessions: register(
+			beefy_lagging_sessions: register(
 				Counter::new(
-					"substrate_beefy_skipped_sessions",
-					"Number of sessions without a signed commitment",
+					"substrate_beefy_lagging_sessions",
+					"Number of sessions with lagging signed commitment on mandatory block",
 				)?,
 				registry,
 			)?,
@@ -95,5 +101,13 @@ macro_rules! metric_inc {
 		if let Some(metrics) = $self.metrics.as_ref() {
 			metrics.$m.inc();
 		}
+	}};
+}
+
+#[cfg(test)]
+#[macro_export]
+macro_rules! metric_get {
+	($self:ident, $m:ident) => {{
+		$self.metrics.as_ref().map(|metrics| metrics.$m.clone())
 	}};
 }

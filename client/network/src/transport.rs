@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2018-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2018-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -54,14 +54,27 @@ pub fn build_transport(
 ) -> (Boxed<(PeerId, StreamMuxerBox)>, Arc<BandwidthSinks>) {
 	// Build the base layer of the transport.
 	let transport = if !memory_only {
-		let desktop_trans = tcp::TcpConfig::new().nodelay(true);
-		let desktop_trans =
-			websocket::WsConfig::new(desktop_trans.clone()).or_transport(desktop_trans);
-		let dns_init = futures::executor::block_on(dns::DnsConfig::system(desktop_trans.clone()));
+		// Main transport: DNS(TCP)
+		let tcp_config = tcp::Config::new().nodelay(true);
+		let tcp_trans = tcp::tokio::Transport::new(tcp_config.clone());
+		let dns_init = dns::TokioDnsConfig::system(tcp_trans);
+
 		EitherTransport::Left(if let Ok(dns) = dns_init {
-			EitherTransport::Left(dns)
+			// WS + WSS transport
+			//
+			// Main transport can't be used for `/wss` addresses because WSS transport needs
+			// unresolved addresses (BUT WSS transport itself needs an instance of DNS transport to
+			// resolve and dial addresses).
+			let tcp_trans = tcp::tokio::Transport::new(tcp_config);
+			let dns_for_wss = dns::TokioDnsConfig::system(tcp_trans)
+				.expect("same system_conf & resolver to work");
+			EitherTransport::Left(websocket::WsConfig::new(dns_for_wss).or_transport(dns))
 		} else {
-			EitherTransport::Right(desktop_trans.map_err(dns::DnsErr::Transport))
+			// In case DNS can't be constructed, fallback to TCP + WS (WSS won't work)
+			let tcp_trans = tcp::tokio::Transport::new(tcp_config.clone());
+			let desktop_trans = websocket::WsConfig::new(tcp_trans)
+				.or_transport(tcp::tokio::Transport::new(tcp_config));
+			EitherTransport::Right(desktop_trans)
 		})
 	} else {
 		EitherTransport::Right(OptionalTransport::some(
@@ -82,11 +95,11 @@ pub fn build_transport(
 				rare panic here is basically zero");
 
 			// Legacy noise configurations for backward compatibility.
-			let mut noise_legacy = noise::LegacyConfig::default();
-			noise_legacy.recv_legacy_handshake = true;
+			let noise_legacy =
+				noise::LegacyConfig { recv_legacy_handshake: true, ..Default::default() };
 
 			let mut xx_config = noise::NoiseConfig::xx(noise_keypair);
-			xx_config.set_legacy_config(noise_legacy.clone());
+			xx_config.set_legacy_config(noise_legacy);
 			xx_config.into_authenticated()
 		};
 

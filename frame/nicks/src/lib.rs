@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -47,6 +47,7 @@ type AccountIdOf<T> = <T as frame_system::Config>::AccountId;
 type BalanceOf<T> = <<T as Config>::Currency as Currency<AccountIdOf<T>>>::Balance;
 type NegativeImbalanceOf<T> =
 	<<T as Config>::Currency as Currency<AccountIdOf<T>>>::NegativeImbalance;
+type AccountIdLookupOf<T> = <<T as frame_system::Config>::Lookup as StaticLookup>::Source;
 
 #[frame_support::pallet]
 pub mod pallet {
@@ -57,7 +58,7 @@ pub mod pallet {
 	#[pallet::config]
 	pub trait Config: frame_system::Config {
 		/// The overarching event type.
-		type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
+		type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
 
 		/// The currency trait.
 		type Currency: ReservableCurrency<Self::AccountId>;
@@ -70,7 +71,7 @@ pub mod pallet {
 		type Slashed: OnUnbalanced<NegativeImbalanceOf<Self>>;
 
 		/// The origin which may forcibly set or remove a name. Root can always do this.
-		type ForceOrigin: EnsureOrigin<Self::Origin>;
+		type ForceOrigin: EnsureOrigin<Self::RuntimeOrigin>;
 
 		/// The minimum length a name may be.
 		#[pallet::constant]
@@ -110,7 +111,7 @@ pub mod pallet {
 	/// The lookup table for names.
 	#[pallet::storage]
 	pub(super) type NameOf<T: Config> =
-		StorageMap<_, Twox64Concat, T::AccountId, (Vec<u8>, BalanceOf<T>)>;
+		StorageMap<_, Twox64Concat, T::AccountId, (BoundedVec<u8, T::MaxLength>, BalanceOf<T>)>;
 
 	#[pallet::pallet]
 	#[pallet::generate_store(pub(super) trait Store)]
@@ -134,24 +135,26 @@ pub mod pallet {
 		/// - One storage read/write.
 		/// - One event.
 		/// # </weight>
+		#[pallet::call_index(0)]
 		#[pallet::weight(50_000_000)]
 		pub fn set_name(origin: OriginFor<T>, name: Vec<u8>) -> DispatchResult {
 			let sender = ensure_signed(origin)?;
 
-			ensure!(name.len() >= T::MinLength::get() as usize, Error::<T>::TooShort);
-			ensure!(name.len() <= T::MaxLength::get() as usize, Error::<T>::TooLong);
+			let bounded_name: BoundedVec<_, _> =
+				name.try_into().map_err(|_| Error::<T>::TooLong)?;
+			ensure!(bounded_name.len() >= T::MinLength::get() as usize, Error::<T>::TooShort);
 
 			let deposit = if let Some((_, deposit)) = <NameOf<T>>::get(&sender) {
 				Self::deposit_event(Event::<T>::NameChanged { who: sender.clone() });
 				deposit
 			} else {
 				let deposit = T::ReservationFee::get();
-				T::Currency::reserve(&sender, deposit.clone())?;
+				T::Currency::reserve(&sender, deposit)?;
 				Self::deposit_event(Event::<T>::NameSet { who: sender.clone() });
 				deposit
 			};
 
-			<NameOf<T>>::insert(&sender, (name, deposit));
+			<NameOf<T>>::insert(&sender, (bounded_name, deposit));
 			Ok(())
 		}
 
@@ -165,13 +168,14 @@ pub mod pallet {
 		/// - One storage read/write.
 		/// - One event.
 		/// # </weight>
+		#[pallet::call_index(1)]
 		#[pallet::weight(70_000_000)]
 		pub fn clear_name(origin: OriginFor<T>) -> DispatchResult {
 			let sender = ensure_signed(origin)?;
 
 			let deposit = <NameOf<T>>::take(&sender).ok_or(Error::<T>::Unnamed)?.1;
 
-			let err_amount = T::Currency::unreserve(&sender, deposit.clone());
+			let err_amount = T::Currency::unreserve(&sender, deposit);
 			debug_assert!(err_amount.is_zero());
 
 			Self::deposit_event(Event::<T>::NameCleared { who: sender, deposit });
@@ -180,7 +184,7 @@ pub mod pallet {
 
 		/// Remove an account's name and take charge of the deposit.
 		///
-		/// Fails if `who` has not been named. The deposit is dealt with through `T::Slashed`
+		/// Fails if `target` has not been named. The deposit is dealt with through `T::Slashed`
 		/// imbalance handler.
 		///
 		/// The dispatch origin for this call must match `T::ForceOrigin`.
@@ -191,11 +195,9 @@ pub mod pallet {
 		/// - One storage read/write.
 		/// - One event.
 		/// # </weight>
+		#[pallet::call_index(2)]
 		#[pallet::weight(70_000_000)]
-		pub fn kill_name(
-			origin: OriginFor<T>,
-			target: <T::Lookup as StaticLookup>::Source,
-		) -> DispatchResult {
+		pub fn kill_name(origin: OriginFor<T>, target: AccountIdLookupOf<T>) -> DispatchResult {
 			T::ForceOrigin::ensure_origin(origin)?;
 
 			// Figure out who we're meant to be clearing.
@@ -203,7 +205,7 @@ pub mod pallet {
 			// Grab their deposit (and check that they have one).
 			let deposit = <NameOf<T>>::take(&target).ok_or(Error::<T>::Unnamed)?.1;
 			// Slash their deposit from them.
-			T::Slashed::on_unbalanced(T::Currency::slash_reserved(&target, deposit.clone()).0);
+			T::Slashed::on_unbalanced(T::Currency::slash_reserved(&target, deposit).0);
 
 			Self::deposit_event(Event::<T>::NameKilled { target, deposit });
 			Ok(())
@@ -221,17 +223,20 @@ pub mod pallet {
 		/// - One storage read/write.
 		/// - One event.
 		/// # </weight>
+		#[pallet::call_index(3)]
 		#[pallet::weight(70_000_000)]
 		pub fn force_name(
 			origin: OriginFor<T>,
-			target: <T::Lookup as StaticLookup>::Source,
+			target: AccountIdLookupOf<T>,
 			name: Vec<u8>,
 		) -> DispatchResult {
 			T::ForceOrigin::ensure_origin(origin)?;
 
+			let bounded_name: BoundedVec<_, _> =
+				name.try_into().map_err(|_| Error::<T>::TooLong)?;
 			let target = T::Lookup::lookup(target)?;
 			let deposit = <NameOf<T>>::get(&target).map(|x| x.1).unwrap_or_else(Zero::zero);
-			<NameOf<T>>::insert(&target, (name, deposit));
+			<NameOf<T>>::insert(&target, (bounded_name, deposit));
 
 			Self::deposit_event(Event::<T>::NameForced { target });
 			Ok(())
@@ -245,7 +250,7 @@ mod tests {
 	use crate as pallet_nicks;
 
 	use frame_support::{
-		assert_noop, assert_ok, ord_parameter_types, parameter_types,
+		assert_noop, assert_ok, ord_parameter_types,
 		traits::{ConstU32, ConstU64},
 	};
 	use frame_system::EnsureSignedBy;
@@ -270,25 +275,21 @@ mod tests {
 		}
 	);
 
-	parameter_types! {
-		pub BlockWeights: frame_system::limits::BlockWeights =
-			frame_system::limits::BlockWeights::simple_max(1024);
-	}
 	impl frame_system::Config for Test {
 		type BaseCallFilter = frame_support::traits::Everything;
 		type BlockWeights = ();
 		type BlockLength = ();
 		type DbWeight = ();
-		type Origin = Origin;
+		type RuntimeOrigin = RuntimeOrigin;
 		type Index = u64;
 		type BlockNumber = u64;
 		type Hash = H256;
-		type Call = Call;
+		type RuntimeCall = RuntimeCall;
 		type Hashing = BlakeTwo256;
 		type AccountId = u64;
 		type Lookup = IdentityLookup<Self::AccountId>;
 		type Header = Header;
-		type Event = Event;
+		type RuntimeEvent = RuntimeEvent;
 		type BlockHashCount = ConstU64<250>;
 		type Version = ();
 		type PalletInfo = PalletInfo;
@@ -306,7 +307,7 @@ mod tests {
 		type MaxReserves = ();
 		type ReserveIdentifier = [u8; 8];
 		type Balance = u64;
-		type Event = Event;
+		type RuntimeEvent = RuntimeEvent;
 		type DustRemoval = ();
 		type ExistentialDeposit = ConstU64<1>;
 		type AccountStore = System;
@@ -317,7 +318,7 @@ mod tests {
 		pub const One: u64 = 1;
 	}
 	impl Config for Test {
-		type Event = Event;
+		type RuntimeEvent = RuntimeEvent;
 		type Currency = Balances;
 		type ReservationFee = ConstU64<2>;
 		type Slashed = ();
@@ -337,9 +338,9 @@ mod tests {
 	#[test]
 	fn kill_name_should_work() {
 		new_test_ext().execute_with(|| {
-			assert_ok!(Nicks::set_name(Origin::signed(2), b"Dave".to_vec()));
+			assert_ok!(Nicks::set_name(RuntimeOrigin::signed(2), b"Dave".to_vec()));
 			assert_eq!(Balances::total_balance(&2), 10);
-			assert_ok!(Nicks::kill_name(Origin::signed(1), 2));
+			assert_ok!(Nicks::kill_name(RuntimeOrigin::signed(1), 2));
 			assert_eq!(Balances::total_balance(&2), 8);
 			assert_eq!(<NameOf<Test>>::get(2), None);
 		});
@@ -349,32 +350,42 @@ mod tests {
 	fn force_name_should_work() {
 		new_test_ext().execute_with(|| {
 			assert_noop!(
-				Nicks::set_name(Origin::signed(2), b"Dr. David Brubeck, III".to_vec()),
+				Nicks::set_name(RuntimeOrigin::signed(2), b"Dr. David Brubeck, III".to_vec()),
 				Error::<Test>::TooLong,
 			);
 
-			assert_ok!(Nicks::set_name(Origin::signed(2), b"Dave".to_vec()));
+			assert_ok!(Nicks::set_name(RuntimeOrigin::signed(2), b"Dave".to_vec()));
 			assert_eq!(Balances::reserved_balance(2), 2);
-			assert_ok!(Nicks::force_name(Origin::signed(1), 2, b"Dr. David Brubeck, III".to_vec()));
+			assert_noop!(
+				Nicks::force_name(RuntimeOrigin::signed(1), 2, b"Dr. David Brubeck, III".to_vec()),
+				Error::<Test>::TooLong,
+			);
+			assert_ok!(Nicks::force_name(
+				RuntimeOrigin::signed(1),
+				2,
+				b"Dr. Brubeck, III".to_vec()
+			));
 			assert_eq!(Balances::reserved_balance(2), 2);
-			assert_eq!(<NameOf<Test>>::get(2).unwrap(), (b"Dr. David Brubeck, III".to_vec(), 2));
+			let (name, amount) = <NameOf<Test>>::get(2).unwrap();
+			assert_eq!(name, b"Dr. Brubeck, III".to_vec());
+			assert_eq!(amount, 2);
 		});
 	}
 
 	#[test]
 	fn normal_operation_should_work() {
 		new_test_ext().execute_with(|| {
-			assert_ok!(Nicks::set_name(Origin::signed(1), b"Gav".to_vec()));
+			assert_ok!(Nicks::set_name(RuntimeOrigin::signed(1), b"Gav".to_vec()));
 			assert_eq!(Balances::reserved_balance(1), 2);
 			assert_eq!(Balances::free_balance(1), 8);
 			assert_eq!(<NameOf<Test>>::get(1).unwrap().0, b"Gav".to_vec());
 
-			assert_ok!(Nicks::set_name(Origin::signed(1), b"Gavin".to_vec()));
+			assert_ok!(Nicks::set_name(RuntimeOrigin::signed(1), b"Gavin".to_vec()));
 			assert_eq!(Balances::reserved_balance(1), 2);
 			assert_eq!(Balances::free_balance(1), 8);
 			assert_eq!(<NameOf<Test>>::get(1).unwrap().0, b"Gavin".to_vec());
 
-			assert_ok!(Nicks::clear_name(Origin::signed(1)));
+			assert_ok!(Nicks::clear_name(RuntimeOrigin::signed(1)));
 			assert_eq!(Balances::reserved_balance(1), 0);
 			assert_eq!(Balances::free_balance(1), 10);
 		});
@@ -383,24 +394,27 @@ mod tests {
 	#[test]
 	fn error_catching_should_work() {
 		new_test_ext().execute_with(|| {
-			assert_noop!(Nicks::clear_name(Origin::signed(1)), Error::<Test>::Unnamed);
+			assert_noop!(Nicks::clear_name(RuntimeOrigin::signed(1)), Error::<Test>::Unnamed);
 
 			assert_noop!(
-				Nicks::set_name(Origin::signed(3), b"Dave".to_vec()),
+				Nicks::set_name(RuntimeOrigin::signed(3), b"Dave".to_vec()),
 				pallet_balances::Error::<Test, _>::InsufficientBalance
 			);
 
 			assert_noop!(
-				Nicks::set_name(Origin::signed(1), b"Ga".to_vec()),
+				Nicks::set_name(RuntimeOrigin::signed(1), b"Ga".to_vec()),
 				Error::<Test>::TooShort
 			);
 			assert_noop!(
-				Nicks::set_name(Origin::signed(1), b"Gavin James Wood, Esquire".to_vec()),
+				Nicks::set_name(RuntimeOrigin::signed(1), b"Gavin James Wood, Esquire".to_vec()),
 				Error::<Test>::TooLong
 			);
-			assert_ok!(Nicks::set_name(Origin::signed(1), b"Dave".to_vec()));
-			assert_noop!(Nicks::kill_name(Origin::signed(2), 1), BadOrigin);
-			assert_noop!(Nicks::force_name(Origin::signed(2), 1, b"Whatever".to_vec()), BadOrigin);
+			assert_ok!(Nicks::set_name(RuntimeOrigin::signed(1), b"Dave".to_vec()));
+			assert_noop!(Nicks::kill_name(RuntimeOrigin::signed(2), 1), BadOrigin);
+			assert_noop!(
+				Nicks::force_name(RuntimeOrigin::signed(2), 1, b"Whatever".to_vec()),
+				BadOrigin
+			);
 		});
 	}
 }

@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2021-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -110,7 +110,7 @@ where
 	// Accept all valid directives and print invalid ones
 	fn parse_user_directives(mut env_filter: EnvFilter, dirs: &str) -> Result<EnvFilter> {
 		for dir in dirs.split(',') {
-			env_filter = env_filter.add_directive(parse_default_directive(&dir)?);
+			env_filter = env_filter.add_directive(parse_default_directive(dir)?);
 		}
 		Ok(env_filter)
 	}
@@ -133,7 +133,14 @@ where
 		.add_directive(
 			parse_default_directive("cranelift_wasm=warn").expect("provided directive is valid"),
 		)
-		.add_directive(parse_default_directive("hyper=warn").expect("provided directive is valid"));
+		.add_directive(parse_default_directive("hyper=warn").expect("provided directive is valid"))
+		.add_directive(
+			parse_default_directive("trust_dns_proto=off").expect("provided directive is valid"),
+		)
+		.add_directive(
+			parse_default_directive("libp2p_mdns::behaviour::iface=off")
+				.expect("provided directive is valid"),
+		);
 
 	if let Ok(lvl) = std::env::var("RUST_LOG") {
 		if lvl != "" {
@@ -296,32 +303,30 @@ impl LoggerBuilder {
 
 				Ok(())
 			}
+		} else if self.log_reloading {
+			let subscriber = prepare_subscriber(
+				&self.directives,
+				None,
+				self.force_colors,
+				self.detailed_output,
+				|builder| enable_log_reloading!(builder),
+			)?;
+
+			tracing::subscriber::set_global_default(subscriber)?;
+
+			Ok(())
 		} else {
-			if self.log_reloading {
-				let subscriber = prepare_subscriber(
-					&self.directives,
-					None,
-					self.force_colors,
-					self.detailed_output,
-					|builder| enable_log_reloading!(builder),
-				)?;
+			let subscriber = prepare_subscriber(
+				&self.directives,
+				None,
+				self.force_colors,
+				self.detailed_output,
+				|builder| builder,
+			)?;
 
-				tracing::subscriber::set_global_default(subscriber)?;
+			tracing::subscriber::set_global_default(subscriber)?;
 
-				Ok(())
-			} else {
-				let subscriber = prepare_subscriber(
-					&self.directives,
-					None,
-					self.force_colors,
-					self.detailed_output,
-					|builder| builder,
-				)?;
-
-				tracing::subscriber::set_global_default(subscriber)?;
-
-				Ok(())
-			}
+			Ok(())
 		}
 	}
 }
@@ -372,7 +377,7 @@ mod tests {
 	fn test_logger_filters() {
 		run_test_in_another_process("test_logger_filters", || {
 			let test_directives =
-				"afg=debug,sync=trace,client=warn,telemetry,something-with-dash=error";
+				"grandpa=debug,sync=trace,client=warn,telemetry,something-with-dash=error";
 			init_logger(&test_directives);
 
 			tracing::dispatcher::get_default(|dispatcher| {
@@ -397,9 +402,9 @@ mod tests {
 					dispatcher.enabled(&metadata)
 				};
 
-				assert!(test_filter("afg", Level::INFO));
-				assert!(test_filter("afg", Level::DEBUG));
-				assert!(!test_filter("afg", Level::TRACE));
+				assert!(test_filter("grandpa", Level::INFO));
+				assert!(test_filter("grandpa", Level::DEBUG));
+				assert!(!test_filter("grandpa", Level::TRACE));
 
 				assert!(test_filter("sync", Level::TRACE));
 				assert!(test_filter("client", Level::WARN));

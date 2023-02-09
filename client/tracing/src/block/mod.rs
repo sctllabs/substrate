@@ -53,7 +53,7 @@ const AVG_SPAN: usize = 100 * 8;
 // are used for the RPC Id this may need to be adjusted. Note: The base payload
 // does not include the RPC result.
 //
-// The estimate is based on the JSONRPC response message which has the following format:
+// The estimate is based on the JSON-RPC response message which has the following format:
 // `{"jsonrpc":"2.0","result":[],"id":18446744073709551615}`.
 //
 // We care about the total size of the payload because jsonrpc-server will simply ignore
@@ -108,7 +108,7 @@ impl BlockSubscriber {
 
 impl Subscriber for BlockSubscriber {
 	fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-		if !metadata.is_span() && !metadata.fields().field(REQUIRED_EVENT_FIELD).is_some() {
+		if !metadata.is_span() && metadata.fields().field(REQUIRED_EVENT_FIELD).is_none() {
 			return false
 		}
 		for (target, level) in &self.targets {
@@ -217,16 +217,15 @@ where
 	pub fn trace_block(&self) -> TraceBlockResult<TraceBlockResponse> {
 		tracing::debug!(target: "state_tracing", "Tracing block: {}", self.block);
 		// Prepare the block
-		let id = BlockId::Hash(self.block);
 		let mut header = self
 			.client
-			.header(id)
-			.map_err(|e| Error::InvalidBlockId(e))?
+			.header(self.block)
+			.map_err(Error::InvalidBlockId)?
 			.ok_or_else(|| Error::MissingBlockComponent("Header not found".to_string()))?;
 		let extrinsics = self
 			.client
-			.block_body(&id)
-			.map_err(|e| Error::InvalidBlockId(e))?
+			.block_body(self.block)
+			.map_err(Error::InvalidBlockId)?
 			.ok_or_else(|| Error::MissingBlockComponent("Extrinsics not found".to_string()))?;
 		tracing::debug!(target: "state_tracing", "Found {} extrinsics", extrinsics.len());
 		let parent_hash = *header.parent_hash();
@@ -252,22 +251,24 @@ where
 				let _enter = span.enter();
 				self.client.runtime_api().execute_block(&parent_id, block)
 			}) {
-				return Err(Error::Dispatch(
-					format!("Failed to collect traces and execute block: {:?}", e).to_string(),
-				))
+				return Err(Error::Dispatch(format!(
+					"Failed to collect traces and execute block: {}",
+					e
+				)))
 			}
 		}
 
-		let block_subscriber =
-			dispatch.downcast_ref::<BlockSubscriber>().ok_or(Error::Dispatch(
+		let block_subscriber = dispatch.downcast_ref::<BlockSubscriber>().ok_or_else(|| {
+			Error::Dispatch(
 				"Cannot downcast Dispatch to BlockSubscriber after tracing block".to_string(),
-			))?;
+			)
+		})?;
 		let spans: Vec<_> = block_subscriber
 			.spans
 			.lock()
 			.drain()
 			// Patch wasm identifiers
-			.filter_map(|(_, s)| patch_and_filter(SpanDatum::from(s), targets))
+			.filter_map(|(_, s)| patch_and_filter(s, targets))
 			.collect();
 		let events: Vec<_> = block_subscriber
 			.events
@@ -296,7 +297,7 @@ where
 			})
 		} else {
 			TraceBlockResponse::BlockTrace(BlockTrace {
-				block_hash: block_id_as_string(id),
+				block_hash: block_id_as_string(BlockId::<Block>::Hash(self.block)),
 				parent_hash: block_id_as_string(parent_id),
 				tracing_targets: targets.to_string(),
 				storage_keys: self.storage_keys.clone().unwrap_or_default(),
@@ -315,7 +316,7 @@ fn event_values_filter(event: &TraceEvent, filter_kind: &str, values: &str) -> b
 		.values
 		.string_values
 		.get(filter_kind)
-		.and_then(|value| Some(check_target(values, value, &event.level)))
+		.map(|value| check_target(values, value, &event.level))
 		.unwrap_or(false)
 }
 

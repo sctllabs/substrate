@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2020-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) 2020-2022 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -126,10 +126,7 @@ pub mod pallet {
 		type AuthorityId: AppCrypto<Self::Public, Self::Signature>;
 
 		/// The overarching event type.
-		type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
-
-		/// The overarching dispatch call type.
-		type Call: From<Call<Self>>;
+		type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
 
 		// Configuration parameters
 
@@ -154,6 +151,10 @@ pub mod pallet {
 		/// multiple pallets send unsigned transactions.
 		#[pallet::constant]
 		type UnsignedPriority: Get<TransactionPriority>;
+
+		/// Maximum number of prices.
+		#[pallet::constant]
+		type MaxPrices: Get<u32>;
 	}
 
 	#[pallet::pallet]
@@ -228,6 +229,7 @@ pub mod pallet {
 		/// working and receives (and provides) meaningful data.
 		/// This example is not focused on correctness of the oracle itself, but rather its
 		/// purpose is to showcase offchain worker capabilities.
+		#[pallet::call_index(0)]
 		#[pallet::weight(0)]
 		pub fn submit_price(origin: OriginFor<T>, price: u32) -> DispatchResultWithPostInfo {
 			// Retrieve sender of the transaction.
@@ -253,6 +255,7 @@ pub mod pallet {
 		///
 		/// This example is not focused on correctness of the oracle itself, but rather its
 		/// purpose is to showcase offchain worker capabilities.
+		#[pallet::call_index(1)]
 		#[pallet::weight(0)]
 		pub fn submit_price_unsigned(
 			origin: OriginFor<T>,
@@ -269,6 +272,7 @@ pub mod pallet {
 			Ok(().into())
 		}
 
+		#[pallet::call_index(2)]
 		#[pallet::weight(0)]
 		pub fn submit_price_unsigned_with_signed_payload(
 			origin: OriginFor<T>,
@@ -329,7 +333,7 @@ pub mod pallet {
 	/// This is used to calculate average price, should have bounded size.
 	#[pallet::storage]
 	#[pallet::getter(fn prices)]
-	pub(super) type Prices<T: Config> = StorageValue<_, Vec<u32>, ValueQuery>;
+	pub(super) type Prices<T: Config> = StorageValue<_, BoundedVec<u32, T::MaxPrices>, ValueQuery>;
 
 	/// Defines the block when next unsigned transaction will be accepted.
 	///
@@ -406,15 +410,14 @@ impl<T: Config> Pallet<T> {
 		match res {
 			// The value has been set correctly, which means we can safely send a transaction now.
 			Ok(block_number) => {
-				// Depending if the block is even or odd we will send a `Signed` or `Unsigned`
-				// transaction.
+				// We will send different transactions based on a random number.
 				// Note that this logic doesn't really guarantee that the transactions will be sent
 				// in an alternating fashion (i.e. fairly distributed). Depending on the execution
 				// order and lock acquisition, we may end up for instance sending two `Signed`
 				// transactions in a row. If a strict order is desired, it's better to use
 				// the storage entry for that. (for instance store both block number and a flag
 				// indicating the type of next transaction to send).
-				let transaction_type = block_number % 3u32.into();
+				let transaction_type = block_number % 4u32.into();
 				if transaction_type == Zero::zero() {
 					TransactionType::Signed
 				} else if transaction_type == T::BlockNumber::from(1u32) {
@@ -442,7 +445,7 @@ impl<T: Config> Pallet<T> {
 		if !signer.can_sign() {
 			return Err(
 				"No local accounts available. Consider adding one via `author_insertKey` RPC.",
-			)?
+			)
 		}
 		// Make an external HTTP request to fetch the current price.
 		// Note this call will block until response is received.
@@ -636,7 +639,7 @@ impl<T: Config> Pallet<T> {
 			_ => return None,
 		};
 
-		let exp = price.fraction_length.checked_sub(2).unwrap_or(0);
+		let exp = price.fraction_length.saturating_sub(2);
 		Some(price.integer as u32 * 100 + (price.fraction / 10_u64.pow(exp)) as u32)
 	}
 
@@ -644,12 +647,8 @@ impl<T: Config> Pallet<T> {
 	fn add_price(maybe_who: Option<T::AccountId>, price: u32) {
 		log::info!("Adding to the average: {}", price);
 		<Prices<T>>::mutate(|prices| {
-			const MAX_LEN: usize = 64;
-
-			if prices.len() < MAX_LEN {
-				prices.push(price);
-			} else {
-				prices[price as usize % MAX_LEN] = price;
+			if prices.try_push(price).is_err() {
+				prices[(price % T::MaxPrices::get()) as usize] = price;
 			}
 		});
 
