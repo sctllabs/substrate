@@ -22,8 +22,8 @@ use crate::testing::{test_executor, timeout_secs};
 use assert_matches::assert_matches;
 use futures::executor;
 use jsonrpsee::{
-	core::Error as RpcError,
-	types::{error::CallError as RpcCallError, EmptyServerParams as EmptyParams, ErrorObject},
+	core::{EmptyServerParams as EmptyParams, Error as RpcError},
+	types::{error::CallError as RpcCallError, ErrorObject},
 };
 use sc_block_builder::BlockBuilderProvider;
 use sc_rpc_api::DenyUnsafe;
@@ -213,7 +213,10 @@ async fn should_notify_about_storage_changes() {
 		let (api, _child) = new_full(client.clone(), test_executor(), DenyUnsafe::No, None);
 
 		let api_rpc = api.into_rpc();
-		let sub = api_rpc.subscribe("state_subscribeStorage", EmptyParams::new()).await.unwrap();
+		let sub = api_rpc
+			.subscribe_unbounded("state_subscribeStorage", EmptyParams::new())
+			.await
+			.unwrap();
 
 		// Cause a change:
 		let mut builder = client.new_block(Default::default()).unwrap();
@@ -249,7 +252,10 @@ async fn should_send_initial_storage_changes_and_notifications() {
 
 		let api_rpc = api.into_rpc();
 		let sub = api_rpc
-			.subscribe("state_subscribeStorage", [[StorageKey(alice_balance_key.to_vec())]])
+			.subscribe_unbounded(
+				"state_subscribeStorage",
+				[[StorageKey(alice_balance_key.to_vec())]],
+			)
 			.await
 			.unwrap();
 
@@ -505,7 +511,7 @@ async fn should_notify_on_runtime_version_initially() {
 
 		let api_rpc = api.into_rpc();
 		let sub = api_rpc
-			.subscribe("state_subscribeRuntimeVersion", EmptyParams::new())
+			.subscribe_unbounded("state_subscribeRuntimeVersion", EmptyParams::new())
 			.await
 			.unwrap();
 
@@ -533,7 +539,7 @@ async fn wildcard_storage_subscriptions_are_rpc_unsafe() {
 	let (api, _child) = new_full(client, test_executor(), DenyUnsafe::Yes, None);
 
 	let api_rpc = api.into_rpc();
-	let err = api_rpc.subscribe("state_subscribeStorage", EmptyParams::new()).await;
+	let err = api_rpc.subscribe_unbounded("state_subscribeStorage", EmptyParams::new()).await;
 	assert_matches!(err, Err(RpcError::Call(RpcCallError::Custom(e))) if e.message() == "RPC call is unsafe to be called externally");
 }
 
@@ -544,7 +550,7 @@ async fn concrete_storage_subscriptions_are_rpc_safe() {
 	let api_rpc = api.into_rpc();
 
 	let key = StorageKey(STORAGE_KEY.to_vec());
-	let sub = api_rpc.subscribe("state_subscribeStorage", [[key]]).await;
+	let sub = api_rpc.subscribe_unbounded("state_subscribeStorage", [[key]]).await;
 
 	assert!(sub.is_ok());
 }
