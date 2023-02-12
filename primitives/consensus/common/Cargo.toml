@@ -1,6 +1,6 @@
 [package]
 name = "sp-consensus"
-version = "0.10.0-dev"
+version = "0.20.0"
 authors = ["Parity Technologies <admin@parity.io>"]
 edition = "2021"
 license = "Apache-2.0"
@@ -21,12 +21,12 @@ codec = { package = "parity-scale-codec", version = "3.2.2", features = [
 futures = { version = "0.3.21", features = ["thread-pool"] }
 log = "0.4.17"
 thiserror = "1.0.30"
-sp-core = { version = "7.0.0", path = "../../core" }
-sp-inherents = { version = "4.0.0-dev", path = "../../inherents" }
-sp-runtime = { version = "7.0.0", path = "../../runtime" }
-sp-state-machine = { version = "0.13.0", path = "../../state-machine" }
-sp-std = { version = "5.0.0", path = "../../std" }
-sp-version = { version = "5.0.0", path = "../../version" }
+sp-core = { version = "16.0.0", path = "../../core" }
+sp-inherents = { version = "14.0.0", path = "../../inherents" }
+sp-runtime = { version = "18.0.0", path = "../../runtime" }
+sp-state-machine = { version = "0.22.0", path = "../../state-machine" }
+sp-std = { version = "6.0.0", path = "../../std" }
+sp-version = { version = "16.0.0", path = "../../version" }
 
 [dev-dependencies]
 futures = "0.3.21"
