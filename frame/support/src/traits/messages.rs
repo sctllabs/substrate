@@ -38,6 +38,7 @@ pub enum ProcessMessageError {
 	/// would be respected. The parameter gives the maximum weight which the message could take
 	/// to process.
 	Overweight(Weight),
+	Yield,
 }
 
 /// Can process messages from a specific origin.
