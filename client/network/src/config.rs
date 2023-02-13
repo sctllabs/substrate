@@ -98,7 +98,7 @@ where
 	pub request_response_protocol_configs: Vec<RequestResponseConfig>,
 
 	/// Sink for received mixnet messages.
-	pub mixnet_sink: Option<TracingUnboundedSender<Vec<u8>>>
+	pub mixnet_sink: Option<TracingUnboundedSender<Vec<u8>>>,
 }
 
 /// Sync operation mode.

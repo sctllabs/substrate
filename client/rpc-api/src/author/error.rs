@@ -56,7 +56,7 @@ pub enum Error {
 	UnsafeRpcCalled(#[from] crate::policy::UnsafeRpcError),
 	/// Network subsystem error.
 	#[error("Network error: {}", .0)]
-	Network(Box<dyn std::error::Error + Send+ Sync>),
+	Network(Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Base code for all authorship errors.

@@ -22,14 +22,17 @@
 use sp_mixnet_types::{KxPublic, KxPublicForSessionError};
 
 pub trait Mixnet: Send {
-    /// Get the key-exchange public key for the local node in the specified session. Note that
-    /// `session_index` should really be an `sp_session::SessionIndex`; it is a `u32` to avoid
-    /// circular crate dependencies.
-    fn kx_public_for_session(&self, session_index: u32) -> Result<KxPublic, KxPublicForSessionError>;
+	/// Get the key-exchange public key for the local node in the specified session. Note that
+	/// `session_index` should really be an `sp_session::SessionIndex`; it is a `u32` to avoid
+	/// circular crate dependencies.
+	fn kx_public_for_session(
+		&self,
+		session_index: u32,
+	) -> Result<KxPublic, KxPublicForSessionError>;
 }
 
 #[cfg(feature = "std")]
 sp_externalities::decl_extension! {
-    /// The mixnet extension to retrieve the local node's key-exchange public keys.
-    pub struct MixnetExt(Box<dyn Mixnet>);
+	/// The mixnet extension to retrieve the local node's key-exchange public keys.
+	pub struct MixnetExt(Box<dyn Mixnet>);
 }

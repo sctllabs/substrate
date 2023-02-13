@@ -1672,11 +1672,13 @@ where
 
 					this.event_streams.send(Event::Dht(event));
 				},
-				Poll::Ready(SwarmEvent::Behaviour(BehaviourOut::MixnetMessage(_sender, message))) => {
+				Poll::Ready(SwarmEvent::Behaviour(BehaviourOut::MixnetMessage(
+					_sender,
+					message,
+				))) =>
 					if let Some(sink) = this.mixnet_sink.as_mut() {
 						let _ = sink.unbounded_send(message);
-					}
-				}
+					},
 				Poll::Ready(SwarmEvent::Behaviour(BehaviourOut::None)) => {
 					// Ignored event from lower layers.
 				},
@@ -1718,12 +1720,16 @@ where
 						};
 						let reason = match cause {
 							Some(ConnectionError::IO(_)) => "transport-error",
-							Some(ConnectionError::Handler(EitherError::A(EitherError::A(EitherError::A(
-								EitherError::B(EitherError::A(PingFailure::Timeout))),
+							Some(ConnectionError::Handler(EitherError::A(EitherError::A(
+								EitherError::A(EitherError::B(EitherError::A(
+									PingFailure::Timeout,
+								))),
 							)))) => "ping-timeout",
-							Some(ConnectionError::Handler(EitherError::A(EitherError::A(EitherError::A(
-								EitherError::A(NotifsHandlerError::SyncNotificationsClogged),
-							))))) => "sync-notifications-clogged",
+							Some(ConnectionError::Handler(EitherError::A(EitherError::A(
+								EitherError::A(EitherError::A(
+									NotifsHandlerError::SyncNotificationsClogged,
+								)),
+							)))) => "sync-notifications-clogged",
 							Some(ConnectionError::Handler(_)) => "protocol-error",
 							Some(ConnectionError::KeepAliveTimeout) => "keep-alive-timeout",
 							None => "actively-closed",

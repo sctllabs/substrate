@@ -22,7 +22,6 @@ use crate::{
 	protocol::{CustomMessageOutcome, NotificationsSink, Protocol},
 	request_responses,
 };
-use mixnet::MixnetBehaviour;
 use bytes::Bytes;
 use codec::{Decode, Encode};
 use futures::channel::oneshot;
@@ -30,8 +29,9 @@ use libp2p::{
 	core::{Multiaddr, PeerId, PublicKey},
 	identify::Info as IdentifyInfo,
 	kad::record,
-	swarm::{NetworkBehaviour, behaviour::toggle::Toggle},
+	swarm::{behaviour::toggle::Toggle, NetworkBehaviour},
 };
+use mixnet::MixnetBehaviour;
 
 use sc_network_common::{
 	protocol::{
@@ -44,8 +44,7 @@ use sc_network_common::{
 use sc_peerset::{PeersetHandle, ReputationChange};
 use sp_blockchain::HeaderBackend;
 use sp_runtime::traits::Block as BlockT;
-use std::{collections::HashSet, time::Duration};
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 pub use crate::request_responses::{InboundFailure, OutboundFailure, RequestId, ResponseFailure};
 
@@ -227,11 +226,10 @@ where
 		if let Some(mixnet) = self.mixnet.as_mut() {
 			if let Ok(decoded) = <B::Extrinsic as Decode>::decode(&mut encoded_tx.as_ref()) {
 				let message = vec![decoded];
-				let send_opts = mixnet::SendOptions {
-					num_hop: None,
-					with_surb: false,
-				};
-				mixnet.send_to_random_recipient(message.encode(), send_opts).map_err(|e| e.to_string())
+				let send_opts = mixnet::SendOptions { num_hop: None, with_surb: false };
+				mixnet
+					.send_to_random_recipient(message.encode(), send_opts)
+					.map_err(|e| e.to_string())
 			} else {
 				Err("Invalid transaction".into())
 			}
@@ -413,11 +411,10 @@ impl From<mixnet::NetworkEvent> for BehaviourOut {
 				if let Ok(pk) = libp2p::identity::ed25519::PublicKey::decode(&message.peer) {
 					let peer_id = libp2p::core::PublicKey::Ed25519(pk).to_peer_id();
 					BehaviourOut::MixnetMessage(peer_id, message.message)
-				}
-				else {
+				} else {
 					BehaviourOut::None
 				}
-			}
+			},
 			_ => BehaviourOut::None,
 		}
 	}

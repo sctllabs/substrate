@@ -74,7 +74,7 @@ fn session_keys(
 	babe: BabeId,
 	im_online: ImOnlineId,
 	authority_discovery: AuthorityDiscoveryId,
-    mixnet: MixnetId,
+	mixnet: MixnetId,
 ) -> SessionKeys {
 	SessionKeys { grandpa, babe, im_online, authority_discovery, mixnet }
 }
@@ -241,7 +241,7 @@ pub fn authority_keys_from_seed(
 		get_from_seed::<BabeId>(seed),
 		get_from_seed::<ImOnlineId>(seed),
 		get_from_seed::<AuthorityDiscoveryId>(seed),
-        get_from_seed::<MixnetId>(seed),
+		get_from_seed::<MixnetId>(seed),
 	)
 }
 
@@ -254,7 +254,7 @@ pub fn testnet_genesis(
 		BabeId,
 		ImOnlineId,
 		AuthorityDiscoveryId,
-        MixnetId,
+		MixnetId,
 	)>,
 	initial_nominators: Vec<AccountId>,
 	root_key: AccountId,
@@ -324,7 +324,13 @@ pub fn testnet_genesis(
 					(
 						x.0.clone(),
 						x.0.clone(),
-						session_keys(x.2.clone(), x.3.clone(), x.4.clone(), x.5.clone(), x.6.clone()),
+						session_keys(
+							x.2.clone(),
+							x.3.clone(),
+							x.4.clone(),
+							x.5.clone(),
+							x.6.clone(),
+						),
 					)
 				})
 				.collect::<Vec<_>>(),
@@ -389,7 +395,7 @@ pub fn testnet_genesis(
 			min_join_bond: 1 * DOLLARS,
 			..Default::default()
 		},
-        mixnet: Default::default(), // TODO Include authorities?
+		mixnet: Default::default(), // TODO Include authorities?
 	}
 }
 

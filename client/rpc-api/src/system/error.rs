@@ -58,7 +58,8 @@ impl From<Error> for JsonRpseeError {
 				e,
 				None::<()>,
 			)),
-			Error::MixnetError(ref e) => CallError::Custom(ErrorObject::owned(BASE_ERROR + 3, e.to_string(), None::<()>)),
+			Error::MixnetError(ref e) =>
+				CallError::Custom(ErrorObject::owned(BASE_ERROR + 3, e.to_string(), None::<()>)),
 		}
 		.into()
 	}

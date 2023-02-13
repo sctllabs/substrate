@@ -188,7 +188,7 @@ fn generate_authority_keys_and_store(seeds: &[String], keystore_path: &Path) -> 
 			authority_discovery.as_slice(),
 		)?;
 
-        insert_key(sp_core::crypto::key_types::MIXNET, mixnet.as_slice())?;
+		insert_key(sp_core::crypto::key_types::MIXNET, mixnet.as_slice())?;
 	}
 
 	Ok(())
