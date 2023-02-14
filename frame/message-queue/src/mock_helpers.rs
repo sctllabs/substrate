@@ -47,7 +47,6 @@ impl From<u32> for MessageOrigin {
 	}
 }
 
-/// Processes any message and consumes (1, 1) weight per message.
 pub struct NoopMessageProcessor<Origin>(PhantomData<Origin>);
 impl<Origin> ProcessMessage for NoopMessageProcessor<Origin>
 where Origin: codec::FullCodec + MaxEncodedLen + Clone + Eq + PartialEq + TypeInfo + Debug{
@@ -66,6 +65,37 @@ where Origin: codec::FullCodec + MaxEncodedLen + Clone + Eq + PartialEq + TypeIn
 		} else {
 			Err(ProcessMessageError::Overweight(weight))
 		}
+	}
+}
+
+frame_support::parameter_types! {
+	pub storage ShouldYield: u32 = 0;
+}
+
+pub struct MaybeYieldMessageProcessor<Origin>(PhantomData<Origin>);
+
+impl<Origin> MaybeYieldMessageProcessor<Origin> {
+	/// Set how many future calls should return yield.
+	pub fn set_should_yield(how_often: u32) {
+		ShouldYield::set(&how_often);
+	}
+}
+
+impl<Origin> ProcessMessage for MaybeYieldMessageProcessor<Origin>
+where Origin: codec::FullCodec + MaxEncodedLen + Clone + Eq + PartialEq + TypeInfo + Debug {
+	type Origin = Origin;
+
+	fn process_message(
+		_message: &[u8],
+		_origin: Self::Origin,
+		_weight_limit: Weight,
+	) -> Result<(bool, Weight), ProcessMessageError> {
+		let should_yield = ShouldYield::get();
+		if should_yield > 0 {
+			ShouldYield::set(&(should_yield -1));
+			return Err(ProcessMessageError::Yield);
+		}
+		Ok((true, Weight::zero()))
 	}
 }
 

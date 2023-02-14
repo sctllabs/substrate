@@ -1140,7 +1140,7 @@ impl<T: Config> Pallet<T> {
 		overweight_limit: Weight,
 	) -> MessageExecutionStatus {
 		let hash = T::Hashing::hash(message);
-		use ProcessMessageError::Overweight;
+		use ProcessMessageError::*;
 		match T::MessageProcessor::process_message(message, origin.clone(), weight.remaining()) {
 			Err(Overweight(w)) if w.any_gt(overweight_limit) => {
 				// Permanently overweight.
@@ -1157,7 +1157,11 @@ impl<T: Config> Pallet<T> {
 				// queue.
 				MessageExecutionStatus::InsufficientWeight
 			},
-			Err(error) => {
+			Err(Yield) => {
+				// The super-ordinate functions have to re-check for out-of-weight anyway, so returning this should be fine.
+				MessageExecutionStatus::InsufficientWeight
+			},
+			Err(error @ BadFormat | error @ Corrupt | error @ Unsupported) => {
 				// Permanent error - drop
 				Self::deposit_event(Event::<T>::ProcessingFailed { hash, origin, error });
 				MessageExecutionStatus::Unprocessable

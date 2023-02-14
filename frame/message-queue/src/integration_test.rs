@@ -39,6 +39,7 @@ use sp_runtime::{
 	testing::Header,
 	traits::{BlakeTwo256, IdentityLookup},
 };
+use std::collections::{BTreeSet, BTreeMap};
 
 type UncheckedExtrinsic = frame_system::mocking::MockUncheckedExtrinsic<Test>;
 type Block = frame_system::mocking::MockBlock<Test>;
@@ -130,7 +131,7 @@ fn stress_test_enqueue_and_service() {
 		let mut msgs_remaining = 0;
 		for _ in 0..blocks {
 			// Start by enqueuing a large number of messages.
-			let (enqueued, _) =
+			let (enqueued, _, _) =
 				enqueue_messages(max_queues, max_messages_per_queue, max_msg_len, &mut rng);
 			msgs_remaining += enqueued;
 
@@ -146,16 +147,53 @@ fn stress_test_enqueue_and_service() {
 	});
 }
 
+#[test]
+#[ignore] // Only run in the CI.
+fn stress_test_queue_suspension() {
+	let blocks = 20;
+	let max_queues = 10_000;
+	let max_messages_per_queue = 10_000;
+	let (max_suspend_per_block, max_resume_per_block) = (100, 50);
+	let max_msg_len = MaxMessageLenOf::<Test>::get();
+	let mut rng = StdRng::seed_from_u64(42);
+	
+	new_test_ext::<Test>().execute_with(|| {
+		let mut per_queue = BTreeMap::new();
+		let mut msgs_remaining = 0;
+
+		for _ in 0..blocks {
+			// Start by enqueuing a large number of messages.
+			let (enqueued, _, new_per_queue) =
+				enqueue_messages(max_queues, max_messages_per_queue, max_msg_len, &mut rng);
+			msgs_remaining += enqueued;
+			per_queue.extend(new_per_queue);
+
+			// Pick a fraction of all messages currently in queue and process them.
+			let processed = rng.gen_range(1..=msgs_remaining);
+			log::info!("Processing {} of all messages {}", processed, msgs_remaining);
+			process_messages(processed); // This also advances the block.
+			msgs_remaining -= processed;
+		}
+		log::info!("Processing all remaining {} messages", msgs_remaining);
+		process_messages(msgs_remaining);
+		post_conditions();
+	});
+}
+
 /// Enqueue a random number of random messages into a random number of queues.
+///
+/// Returns the total number of enqueued messages, their combined length and the number of messages per queue.
 fn enqueue_messages(
 	max_queues: u32,
 	max_per_queue: u32,
 	max_msg_len: u32,
 	rng: &mut StdRng,
-) -> (u32, usize) {
+) -> (u32, usize, BTreeMap<u32, u32>) {
 	let num_queues = rng.gen_range(1..max_queues);
 	let mut num_messages = 0;
 	let mut total_msg_len = 0;
+	let mut msgs_per_queue = BTreeMap::new();
+
 	for origin in 0..num_queues {
 		let num_messages_per_queue =
 			(rng.sample(Pareto::new(1.0, 1.1).unwrap()) as u32).min(max_per_queue);
@@ -171,6 +209,8 @@ fn enqueue_messages(
 			);
 			total_msg_len += msg_len;
 		}
+		let e = msgs_per_queue.entry(origin).or_default();
+		*e += num_messages_per_queue;
 		num_messages += num_messages_per_queue;
 	}
 	log::info!(
@@ -179,7 +219,7 @@ fn enqueue_messages(
 		num_queues,
 		total_msg_len as f64 / 1024.0
 	);
-	(num_messages, total_msg_len as usize)
+	(num_messages, total_msg_len as usize, msgs_per_queue)
 }
 
 /// Process the number of messages.
@@ -215,7 +255,6 @@ fn post_conditions() {
 	assert_eq!(Pages::<Test>::iter().count(), 0);
 	// Service head is gone.
 	assert!(ServiceHead::<Test>::get().is_none());
-	// This still works fine.
+	// Processing still works fine.
 	assert_eq!(MessageQueue::service_queues(Weight::MAX), Weight::zero(), "Nothing left");
-	next_block();
 }
