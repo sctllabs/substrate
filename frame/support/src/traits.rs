@@ -114,8 +114,8 @@ pub use preimages::{Bounded, BoundedInline, FetchResult, Hash, QueryPreimage, St
 
 mod messages;
 pub use messages::{
-	EnqueueMessage, ExecuteOverweightError, Footprint, ProcessMessage, ProcessMessageError, OnQueueChanged,
-	QueueIntrospect, ServiceQueues, TransformOrigin, NoopServiceQueues,
+	EnqueueMessage, ExecuteOverweightError, Footprint, NoopServiceQueues, OnQueueChanged,
+	ProcessMessage, ProcessMessageError, QueueIntrospect, ServiceQueues, TransformOrigin,
 };
 
 #[cfg(feature = "try-runtime")]

@@ -49,7 +49,9 @@ impl From<u32> for MessageOrigin {
 
 pub struct NoopMessageProcessor<Origin>(PhantomData<Origin>);
 impl<Origin> ProcessMessage for NoopMessageProcessor<Origin>
-where Origin: codec::FullCodec + MaxEncodedLen + Clone + Eq + PartialEq + TypeInfo + Debug{
+where
+	Origin: codec::FullCodec + MaxEncodedLen + Clone + Eq + PartialEq + TypeInfo + Debug,
+{
 	type Origin = Origin;
 
 	fn process_message(
@@ -82,7 +84,9 @@ impl<Origin> MaybeYieldMessageProcessor<Origin> {
 }
 
 impl<Origin> ProcessMessage for MaybeYieldMessageProcessor<Origin>
-where Origin: codec::FullCodec + MaxEncodedLen + Clone + Eq + PartialEq + TypeInfo + Debug {
+where
+	Origin: codec::FullCodec + MaxEncodedLen + Clone + Eq + PartialEq + TypeInfo + Debug,
+{
 	type Origin = Origin;
 
 	fn process_message(
@@ -92,8 +96,8 @@ where Origin: codec::FullCodec + MaxEncodedLen + Clone + Eq + PartialEq + TypeIn
 	) -> Result<(bool, Weight), ProcessMessageError> {
 		let should_yield = ShouldYield::get();
 		if should_yield > 0 {
-			ShouldYield::set(&(should_yield -1));
-			return Err(ProcessMessageError::Yield);
+			ShouldYield::set(&(should_yield - 1));
+			return Err(ProcessMessageError::Yield)
 		}
 		Ok((true, Weight::zero()))
 	}

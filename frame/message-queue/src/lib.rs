@@ -194,8 +194,8 @@ use frame_support::{
 	defensive,
 	pallet_prelude::*,
 	traits::{
-		DefensiveTruncateFrom, EnqueueMessage, ExecuteOverweightError, Footprint, ProcessMessage, OnQueueChanged,
-		ProcessMessageError, ServiceQueues,
+		DefensiveTruncateFrom, EnqueueMessage, ExecuteOverweightError, Footprint, OnQueueChanged,
+		ProcessMessage, ProcessMessageError, ServiceQueues,
 	},
 	BoundedSlice, CloneNoBound, DefaultNoBound,
 };
@@ -248,8 +248,6 @@ pub struct Page<Size: Into<u32> + Debug + Clone + Default, HeapSize: Get<Size>> 
 	/// The heap. If `self.offset == self.heap.len()` then the page is empty and should be deleted.
 	heap: BoundedVec<u8, IntoU32<HeapSize, Size>>,
 }
-
-const LOG_TARGET: &'static str = "runtime::message-queue";
 
 impl<
 		Size: BaseArithmetic + Unsigned + Copy + Into<u32> + Codec + MaxEncodedLen + Debug + Default,
@@ -564,10 +562,8 @@ pub mod pallet {
 	impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
 		fn on_initialize(_n: BlockNumberFor<T>) -> Weight {
 			if let Some(weight_limit) = T::ServiceWeight::get() {
-				log::warn!(target: LOG_TARGET, "on_init: weight {}", weight_limit);
 				Self::service_queues(weight_limit)
 			} else {
-				log::warn!(target: LOG_TARGET, "on_init: not enough weight");
 				Weight::zero()
 			}
 		}
@@ -747,11 +743,6 @@ impl<T: Config> Pallet<T> {
 			.size
 			// This should be payload size, but here the payload *is* the message.
 			.saturating_accrue(message.len() as u64);
-		log::warn!(
-			target: LOG_TARGET,
-			"Enqueuing message of size {} bytes",
-			message.len(),
-		);
 
 		if book_state.end > book_state.begin {
 			debug_assert!(book_state.ready_neighbours.is_some(), "Must be in ready ring if ready");
@@ -1158,7 +1149,8 @@ impl<T: Config> Pallet<T> {
 				MessageExecutionStatus::InsufficientWeight
 			},
 			Err(Yield) => {
-				// The super-ordinate functions have to re-check for out-of-weight anyway, so returning this should be fine.
+				// The super-ordinate functions have to re-check for out-of-weight anyway, so
+				// returning this should be fine.
 				MessageExecutionStatus::InsufficientWeight
 			},
 			Err(error @ BadFormat | error @ Corrupt | error @ Unsupported) => {

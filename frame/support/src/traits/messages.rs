@@ -40,7 +40,10 @@ pub enum ProcessMessageError {
 	Overweight(Weight),
 	/// The queue wants to give up its processing slot.
 	///
-	/// The message processor sees this as a *hint*, not as instruction. Implementations must therefore handle the case that they are being re-service within the same block after *yielding*. The queue is not restricted to *yield* again when it is being re-serviced withing the same block after *yielding*.
+	/// The message processor sees this as a *hint*, not as instruction. Implementations must
+	/// therefore handle the case that they are being re-service within the same block after
+	/// *yielding*. The queue is not restricted to *yield* again when it is being re-serviced
+	/// withing the same block after *yielding*.
 	Yield,
 }
 
@@ -92,7 +95,7 @@ pub trait ServiceQueues {
 pub struct NoopServiceQueues<OverweightAddr>(PhantomData<OverweightAddr>);
 impl<OverweightAddr> ServiceQueues for NoopServiceQueues<OverweightAddr> {
 	type OverweightMessageAddress = OverweightAddr;
-	
+
 	fn service_queues(_: Weight) -> Weight {
 		Weight::zero()
 	}

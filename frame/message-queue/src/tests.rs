@@ -215,7 +215,10 @@ fn service_queues_suspension_works() {
 	new_test_ext::<Test>().execute_with(|| {
 		MessageQueue::enqueue_messages(vec![msg("a"), msg("b"), msg("c")].into_iter(), Here);
 		MessageQueue::enqueue_messages(vec![msg("x"), msg("y"), msg("z")].into_iter(), There);
-		MessageQueue::enqueue_messages(vec![msg("m"), msg("n"), msg("o")].into_iter(), Everywhere(0));
+		MessageQueue::enqueue_messages(
+			vec![msg("m"), msg("n"), msg("o")].into_iter(),
+			Everywhere(0),
+		);
 		assert_eq!(QueueChanges::take(), vec![(Here, 3, 3), (There, 3, 3), (Everywhere(0), 3, 3)]);
 
 		// Service one message from `Here`.
@@ -232,7 +235,8 @@ fn service_queues_suspension_works() {
 		assert_eq!(MessagesProcessed::take(), vec![(vmsg("x"), There)]);
 		assert_eq!(QueueChanges::take(), vec![(There, 2, 2)]);
 
-		// Now it would normally swap to `Everywhere(0)` nad `Here`, but they are paused so we expect `There` again.
+		// Now it would normally swap to `Everywhere(0)` nad `Here`, but they are paused so we
+		// expect `There` again.
 		ServiceHead::<Test>::set(There.into());
 		assert_eq!(MessageQueue::service_queues(2.into_weight()), 2.into_weight());
 		assert_eq!(MessagesProcessed::take(), vec![(vmsg("y"), There), (vmsg("z"), There)]);
@@ -250,7 +254,14 @@ fn service_queues_suspension_works() {
 		assert_eq!(MessageQueue::service_queues(Weight::MAX), Weight::zero());
 		SuspendedQueues::take();
 		assert_eq!(MessageQueue::service_queues(Weight::MAX), 3.into_weight());
-		assert_eq!(MessagesProcessed::take(), vec![(vmsg("m"), Everywhere(0)), (vmsg("n"), Everywhere(0)), (vmsg("o"), Everywhere(0))]);
+		assert_eq!(
+			MessagesProcessed::take(),
+			vec![
+				(vmsg("m"), Everywhere(0)),
+				(vmsg("n"), Everywhere(0)),
+				(vmsg("o"), Everywhere(0))
+			]
+		);
 	});
 }
 
@@ -1141,7 +1152,5 @@ fn enqueue_messages_works() {
 
 #[test]
 fn yield_basic_works() {
-	new_test_ext::<Test>().execute_with(|| {
-
-	});
+	new_test_ext::<Test>().execute_with(|| {});
 }

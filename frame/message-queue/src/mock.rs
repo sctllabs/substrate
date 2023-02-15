@@ -202,10 +202,11 @@ impl ProcessMessage for RecordingMessageProcessor {
 	}
 }
 
-/// Processed a mocked message. Messages that end with `badformat`, `corrupt`, `unsupported` or `yield` will fail with an error respectively.
+/// Processed a mocked message. Messages that end with `badformat`, `corrupt`, `unsupported` or
+/// `yield` will fail with an error respectively.
 fn processing_message(msg: &[u8], origin: &MessageOrigin) -> Result<(), ProcessMessageError> {
 	if SuspendedQueues::get().contains(&origin) {
-		return Err(ProcessMessageError::Yield);
+		return Err(ProcessMessageError::Yield)
 	}
 
 	let msg = String::from_utf8_lossy(msg);
