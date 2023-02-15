@@ -1,7 +1,0 @@
-zeroing of out vec? no long term key material, maybe don't bother
-if newest message to go out, request timer reset
-
-just publish addresses (inc peer id) along with public key on blockchain
-fetch off blockchain incrementally; query count every block, initiate connections as they come in?
-
-rate limiting: limit rate to each peer, disconnect if peer sending too much?
